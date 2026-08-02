@@ -1,0 +1,26 @@
+{
+  "name": "lumen-ai-search",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "dev:api": "node api-server.mjs",
+    "searxng": "docker compose up searxng",
+    "start": "node api-server.mjs",
+    "build": "tsc -p tsconfig.app.json --noEmit && vite build",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "@vitejs/plugin-react": "5.1.1",
+    "lucide-react": "latest",
+    "react": "latest",
+    "react-dom": "latest",
+    "typescript": "5.9.3",
+    "vite": "7.2.0"
+  },
+  "devDependencies": {
+    "@types/react": "^19.2.18",
+    "@types/react-dom": "^19.2.4"
+  }
+}

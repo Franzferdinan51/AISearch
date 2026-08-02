@@ -1,0 +1,26 @@
+services:
+  lumen:
+    build: .
+    ports:
+      - "3000:3000"
+    environment:
+      - LUMEN_API_HOST=0.0.0.0
+      - LUMEN_API_PORT=3000
+      - SEARXNG_URL=http://searxng:8080
+      - LM_STUDIO_URL=${LM_STUDIO_URL:-http://host.docker.internal:1234/v1}
+      - LM_STUDIO_MODEL=${LM_STUDIO_MODEL:-local-model}
+      - LM_API_TOKEN=${LM_API_TOKEN:-}
+      - OPENAI_API_KEY=${OPENAI_API_KEY:-}
+      - MINIMAX_API_KEY=${MINIMAX_API_KEY:-}
+      - XAI_API_KEY=${XAI_API_KEY:-}
+    depends_on:
+      - searxng
+    restart: unless-stopped
+  searxng:
+    build:
+      context: ./infra/searxng
+    ports:
+      - "8080:8080"
+    environment:
+      - SEARXNG_BASE_URL=http://localhost:8080/
+    restart: unless-stopped

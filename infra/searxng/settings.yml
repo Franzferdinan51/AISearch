@@ -1,0 +1,15 @@
+use_default_settings: true
+
+server:
+  bind_address: 0.0.0.0
+  port: 8080
+  secret_key: change-me-in-local-deployment
+  image_proxy: false
+
+search:
+  formats:
+    - html
+    - json
+
+ui:
+  static_use_hash: true
