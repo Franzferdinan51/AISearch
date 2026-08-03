@@ -409,17 +409,22 @@ function salvageOverview(output) {
   return plainText.length >= 80 && !plainText.startsWith('[') && !plainText.startsWith('{') ? plainText.slice(0, 8_000) : ''
 }
 
+function sourceOverview(query, results) {
+  const findings = results.slice(0, 4).map((item, index) => `- **${item.title}** — ${(item.content || 'Relevant website result.').replace(/\s+/g, ' ').slice(0, 220)} [${index + 1}]`)
+  return `## Source overview\nHere are the strongest retrieved website results for “${query}”.\n\n${findings.join('\n')}`
+}
+
 async function curateResults(provider, query, results, override = {}, plan = null, includeOverview = false) {
   if (!results.length) return { results, mode: 'none', error: null }
   const sourceList = results.map((item, index) => `${index + 1}. ${item.title.slice(0, 120)} | ${new URL(item.url).hostname} | ${item.content.replace(/\s+/g, ' ').slice(0, 100)}`).join('\n')
   if (includeOverview && provider === 'lmstudio') {
-    const prompt = `Query: ${query}\n\nReturn ONLY JSON: {"plan":{"focus":"short","criteria":["short"]},"ranking":[{"id":number,"score":0-100,"reason":"max 8 words"}],"overview":"concise Markdown answer with [id] citations"}. Rank every candidate exactly once. The overview must directly answer the query from the candidates only.\n\nCandidates:\n${sourceList}`
+    const prompt = `Query: ${query}\n\nReturn ONLY JSON: {"plan":{"focus":"short"},"ranking":[{"id":number,"score":0-100,"reason":"max 8 words"}],"overview":"2-4 concise Markdown paragraphs/bullets with [id] citations"}. Select and rank only the 6 strongest candidates. The overview must directly answer the query using only the candidates.\n\nCandidates:\n${sourceList}`
     try {
-      const output = await chatCompletion(provider, 'You are Lumen\'s compact search intelligence engine. Plan, rank, and write one evidence-grounded overview in a single response.', prompt, override, { timeoutMs: 55_000, maxTokens: Math.min(1_050, 300 + results.length * 18) })
+      const output = await chatCompletion(provider, 'You are Lumen\'s compact search intelligence engine. Prioritize a useful, cited overview and select only the strongest sources.', prompt, override, { timeoutMs: 35_000, maxTokens: 560 })
       try { return { ...parseSearchIntelligence(output, query, results), mode: 'ai', error: null } }
-      catch (error) { return { results: heuristicRank(query, results), mode: 'heuristic', error: `AI returned an incomplete ranking: ${error.message}`, overview: salvageOverview(output), plan: null } }
+      catch (error) { return { results: heuristicRank(query, results), mode: 'heuristic', error: `AI returned an incomplete ranking: ${error.message}`, overview: salvageOverview(output) || sourceOverview(query, results), plan: null } }
     } catch (error) {
-      return { results: heuristicRank(query, results), mode: 'heuristic', error: error.message, overview: '', plan: null }
+      return { results: heuristicRank(query, results), mode: 'heuristic', error: error.message, overview: sourceOverview(query, results), plan: null }
     }
   }
   const prompt = `Query: ${query}\nSearch focus: ${plan?.focus || 'directly satisfy the user intent'}\n\nRank every candidate. Prefer direct, trustworthy, useful websites. Return ONLY JSON array: [{"id":number,"score":0-100,"reason":"max 8 words"}]. Every id exactly once.\n\nCandidates:\n${sourceList}`
