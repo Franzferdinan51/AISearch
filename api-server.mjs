@@ -410,8 +410,15 @@ function salvageOverview(output) {
     const value = parseJsonObject(output, 'search intelligence')
     if (typeof value.overview === 'string' && value.overview.trim()) return value.overview.trim()
   } catch {}
-  const plainText = output.replace(/```(?:json|markdown)?/gi, '').trim()
-  return plainText.length >= 80 && !plainText.startsWith('[') && !plainText.startsWith('{') ? plainText.slice(0, 8_000) : ''
+  const plainText = String(output || '').replace(/```(?:json|markdown)?/gi, '').trim()
+  // Recover an overview value from almost-JSON responses truncated by a local
+  // model or wrapped in commentary before treating it as ordinary Markdown.
+  const quotedOverview = plainText.match(/["']overview["']\s*:\s*"((?:\\.|[^"\\])*)/i)
+  if (quotedOverview) {
+    try { return JSON.parse(`"${quotedOverview[1]}"`).trim().slice(0, 8_000) } catch { return quotedOverview[1].replace(/\\n/g, '\n').trim().slice(0, 8_000) }
+  }
+  if (plainText.startsWith('[') || plainText.startsWith('{')) return ''
+  return plainText.length >= 24 ? plainText.slice(0, 8_000) : ''
 }
 
 function sourceOverview(query, results) {
@@ -480,8 +487,10 @@ async function curateResults(provider, query, results, override = {}, plan = nul
     let overview = sourceOverview(query, results)
     let planResult = null
     let overviewError = null
+    let modelResponded = false
     try {
       const output = await chatCompletion(provider, 'You are Lumen\'s compact search intelligence engine. Prioritize a useful, cited overview and select only the strongest sources.', prompt, override, { timeoutMs: 35_000, maxTokens: 560 })
+      modelResponded = Boolean(output.trim())
       try {
         const intelligence = parseSearchIntelligence(output, query, results)
         overview = intelligence.overview || overview
@@ -493,7 +502,7 @@ async function curateResults(provider, query, results, override = {}, plan = nul
     const ranked = await rankEveryResultWithAI(provider, query, results, override)
     if (ranked.complete) return { results: ranked.results, mode: 'ai', error: null, overview, plan: planResult }
     const modelReturnedOverview = overview !== sourceOverview(query, results)
-    if (ranked.rankedCount || modelReturnedOverview) {
+    if (ranked.rankedCount || modelReturnedOverview || modelResponded) {
       return { results: ranked.results, mode: 'partial', error: null, warning: ranked.error || overviewError || `AI ranked ${ranked.rankedCount} of ${results.length} results; remaining results use relevance fallback.`, overview, plan: planResult }
     }
     return { results: ranked.results, mode: 'heuristic', error: overviewError || ranked.error || 'The model did not return usable search intelligence.', overview, plan: planResult }
