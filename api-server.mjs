@@ -48,9 +48,10 @@ function safeUrl(raw) {
   return parsed
 }
 
-async function discoverModels(provider, endpoint) {
+async function discoverModels(provider, endpoint, key = '') {
   const configured = safeUrl(endpoint || modelRuntimes[provider]?.endpoint || modelRuntimes.lmstudio.endpoint)
-  const headers = { accept: 'application/json', ...(modelRuntimes[provider]?.key ? { authorization: `Bearer ${modelRuntimes[provider].key}` } : {}) }
+  const providerKey = key || modelRuntimes[provider]?.key
+  const headers = { accept: 'application/json', ...(providerKey ? { authorization: `Bearer ${providerKey}` } : {}) }
   const paths = provider === 'lmstudio' ? ['/api/v1/models', '/v1/models'] : ['/models']
   const errors = []
   for (const pathname of paths) {
@@ -65,7 +66,7 @@ async function discoverModels(provider, endpoint) {
     } catch (error) { errors.push(error.message) }
   }
   const detail = errors.join(' · ')
-  if (provider === 'lmstudio' && /401|403/.test(detail)) throw new Error('Could not load models: LM Studio requires a server token. Start Lumen with LM_API_TOKEN and refresh.')
+  if (provider === 'lmstudio' && /401|403/.test(detail)) throw new Error('Could not load models: LM Studio requires a server token. Add it in Providers and refresh.')
   throw new Error(`Could not load models: ${detail}`)
 }
 
@@ -293,9 +294,10 @@ function extractCliText(provider, output) {
 }
 
 async function chatCompletion(provider, system, prompt, override = {}) {
-  const runtime = { ...(modelRuntimes[provider] || modelRuntimes.lmstudio), endpoint: override.endpoint || undefined, model: override.model || undefined }
+  const runtime = { ...(modelRuntimes[provider] || modelRuntimes.lmstudio), endpoint: override.endpoint || undefined, model: override.model || undefined, key: override.key || undefined }
   runtime.endpoint ||= modelRuntimes[provider]?.endpoint || modelRuntimes.lmstudio.endpoint
   runtime.model ||= modelRuntimes[provider]?.model || modelRuntimes.lmstudio.model
+  runtime.key ||= modelRuntimes[provider]?.key || modelRuntimes.lmstudio.key
   const endpoint = new URL('/chat/completions', safeUrl(runtime.endpoint))
   const response = await fetch(endpoint, {
     method: 'POST', signal: AbortSignal.timeout(45_000), headers: { 'content-type': 'application/json', ...(runtime.key ? { authorization: `Bearer ${runtime.key}` } : {}) },
@@ -430,10 +432,12 @@ async function handle(req, res) {
   if (req.method === 'GET' && !url.pathname.startsWith('/api/')) return serveStatic(url.pathname, res)
   if (req.method === 'GET' && url.pathname === '/api/health') return json(res, 200, { ok: true, service: 'lumen-api', searxng: searxngUrl })
   if (req.method === 'GET' && url.pathname === '/api/providers') return json(res, 200, { providers: Object.keys(providerCommands) })
-  if (req.method === 'GET' && url.pathname === '/api/models') {
-    const provider = modelRuntimes[url.searchParams.get('provider')] ? url.searchParams.get('provider') : 'lmstudio'
+  if ((req.method === 'GET' || req.method === 'POST') && url.pathname === '/api/models') {
+    const body = req.method === 'POST' ? await readBody(req) : {}
+    const requestedProvider = body.provider || url.searchParams.get('provider')
+    const provider = modelRuntimes[requestedProvider] ? requestedProvider : 'lmstudio'
     try {
-      return json(res, 200, { provider, ...(await discoverModels(provider, url.searchParams.get('endpoint') || undefined)) })
+      return json(res, 200, { provider, ...(await discoverModels(provider, body.endpoint || url.searchParams.get('endpoint') || undefined, typeof body.key === 'string' ? body.key : '')) })
     } catch (error) { return json(res, 200, { provider, models: [], error: error.message }) }
   }
   if (req.method === 'GET' && url.pathname === '/api/agents') {

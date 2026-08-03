@@ -32,9 +32,9 @@ For a production-like local stack, run `docker compose up --build`. Lumen is ser
 
 ## Providers, models, and OAuth
 
-Remote API keys stay on the server in `.env`; they are never sent to the browser. Provider settings let you edit each provider's saved model and choose the default used for new searches. Both values are stored locally in the browser.
+Remote API keys stay on the server in `.env`; they are never sent to the browser. Provider settings provide model dropdowns for every built-in provider and let you choose the default used for new searches. Saved models and defaults are stored locally in the browser.
 
-LM Studio uses its local OpenAI-compatible endpoint. Lumen discovers models from LM Studio's local model API. If the LM Studio server has authentication enabled, start Lumen with `LM_API_TOKEN` set, then use **Refresh installed models** in Provider settings. Without that token, Lumen keeps working with other providers and displays an actionable local-only message instead of failing the page.
+LM Studio uses its local OpenAI-compatible endpoint. Lumen discovers its installed models from the local model API, and the Provider settings include a masked **Server API key** field for LM Studio servers with authentication enabled. That token is sent only to the local Lumen API for model discovery and model requests; it is held for the browser session and is never written to localStorage. `LM_API_TOKEN` remains available as a server-side default. Without a token, Lumen keeps working with other providers and displays an actionable local-only message instead of failing the page.
 
 OAuth status and login routes invoke the configured local CLI (`codex`, `mmx`, or `grok`) and return only install/auth state, following the local-session approach used by [Prediction](https://github.com/Franzferdinan51/Prediction). When a remote provider has an authenticated local session, `/api/research` uses that CLI for synthesis without copying credentials into Lumen or the browser; a configured OpenAI-compatible endpoint remains the fallback.
 
@@ -43,7 +43,7 @@ The bridge follows the installed CLI contracts: `codex login`, `mmx auth login`,
 Useful API routes:
 
 - `GET /api/health`
-- `GET /api/models?provider=lmstudio&endpoint=http://127.0.0.1:1234/v1`
+- `POST /api/models` with `{ "provider", "endpoint", "key" }` for authenticated model discovery (the legacy `GET /api/models` route remains available without a key)
 - `POST /api/search` with `{ "query", "category", "page", "provider", "providerConfig", "depth": "quick" | "deep", "maxResults" }`
 - `POST /api/research` with `{ "query", "category", "provider", "providerConfig" }`
 - `GET /api/cli-auth/:provider`
