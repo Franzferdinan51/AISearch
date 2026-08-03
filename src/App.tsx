@@ -141,8 +141,10 @@ function App() {
     void fetch('/api/search/warm', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ query: nextQuery, baseUrl: searchEndpoint, maxResults: 10, provider: selectedProvider, providerConfig: { endpoint: provider.endpoint, model: provider.model } }) }).catch(() => {})
   }
 
-  const runResearch = async (nextQuery = query, nextCategory = searchCategory) => {
+  const runResearch = async (nextQuery = query, nextCategory = searchCategory, execution: { mode?: Mode; view?: 'search' | 'research' } = {}) => {
     if (!nextQuery.trim()) return
+    const activeMode = execution.mode || mode
+    const activeView = execution.view || view
     setQuery(nextQuery)
     setRunning(true)
     setStep(0)
@@ -152,9 +154,9 @@ function App() {
     let current = 0
     const timer = window.setInterval(() => { current += 1; setStep(Math.min(current, 5)); if (current >= 5) window.clearInterval(timer) }, 600)
     try {
-      const isDeep = mode === 'Deep research' || mode === 'Explore' || view === 'research'
-      const endpoint = view === 'research' ? '/api/research' : '/api/search'
-      const response = await fetch(endpoint, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ query: nextQuery, provider: selectedProvider, providerConfig: { endpoint: provider.endpoint, model: provider.model }, baseUrl: searchEndpoint, category: nextCategory, depth: isDeep ? 'deep' : 'quick', maxResults: 10, page: 1, includeOverview: nextCategory === 'general' }) })
+      const isDeep = activeMode === 'Deep research' || activeMode === 'Explore' || activeView === 'research'
+      const endpoint = activeView === 'research' ? '/api/research' : '/api/search'
+      const response = await fetch(endpoint, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ query: nextQuery, provider: selectedProvider, providerConfig: { endpoint: provider.endpoint, model: provider.model }, baseUrl: searchEndpoint, category: nextCategory, depth: isDeep ? 'deep' : 'quick', maxResults: activeMode === 'Quick answer' ? 5 : 10, page: 1, includeOverview: nextCategory === 'general' }) })
       const payload = await response.json()
       if (!response.ok) throw new Error(payload.error || 'Research request failed')
       const normalized = normalizeSources(payload.search?.results || payload.results || [], 1)
@@ -164,7 +166,7 @@ function App() {
       setAnswer(payload.answer || (nextCategory === 'news' ? `Latest news results for “${nextQuery}”.` : nextCategory === 'images' ? `Image results for “${nextQuery}”.` : nextCategory === 'videos' ? `Video results for “${nextQuery}”.` : nextCategory === 'github' ? `GitHub repositories for “${nextQuery}”.` : nextCategory === 'science' ? `Academic and technical results for “${nextQuery}”.` : `Found ${normalized.length} ${payload.curation?.mode === 'ai' ? 'AI-curated' : 'relevance-ranked'} web results for “${nextQuery}”. Review the overview and sources below, or switch to Deep research for a cited synthesis.`))
       if (payload.trace) setTraceSteps(payload.trace); else setTraceSteps([])
       if (normalized.length) setHistory((current) => [{ id: crypto.randomUUID(), query: nextQuery, createdAt: new Date().toISOString(), sources: normalized, answer: payload.answer || '' }, ...current.filter((item) => item.query !== nextQuery)].slice(0, 20))
-      if (view === 'search' && nextCategory === 'general' && normalized.length) warmSearchTabs(nextQuery)
+      if (activeView === 'search' && nextCategory === 'general' && normalized.length) warmSearchTabs(nextQuery)
       setStep(5)
     } catch (error) {
       setApiError(error instanceof Error ? error.message : 'Research API unavailable. Start `npm run dev:api`.')
@@ -240,6 +242,13 @@ function App() {
   const answerTitle = useMemo(() => query || 'Start a new research thread', [query])
   const openHistory = (session: SearchSession) => { setQuery(session.query); setSourceList(session.sources); setAnswer(session.answer); setResultsPage(1); setHasMoreResults(true); setView('search') }
   const newSearch = () => { setView('search'); setMode('Web search'); setQuery(''); setInput(''); setSourceList([]); setAnswer(''); setTraceSteps([]); setApiError(''); setResultsPage(1); setHasMoreResults(true); setCurationMode('none'); setRunning(false) }
+  const selectMode = (nextMode: Mode) => {
+    const nextView = nextMode === 'Deep research' || nextMode === 'Explore' ? 'research' : 'search'
+    setMode(nextMode)
+    setView(nextView)
+    setShowMode(false)
+    if (query) void runResearch(query, searchCategory, { mode: nextMode, view: nextView })
+  }
   const shareResearch = async () => {
     const shareData = { title: answerTitle, text: cleanMarkdown(answer) }
     if (navigator.share) { await navigator.share(shareData); return }
@@ -269,7 +278,7 @@ function App() {
           <div className="topbar-group">
             <div className="select-wrap">
               <button className="select-button" onClick={() => setShowMode(!showMode)}><span className="round-icon"><Split size={15} /></span>{mode}<ChevronDown size={16} /></button>
-              {showMode && <Dropdown items={['Web search', 'Quick answer', 'Deep research', 'Explore']} onSelect={(item) => { const nextMode = item as Mode; setMode(nextMode); setView(nextMode === 'Deep research' ? 'research' : 'search'); setShowMode(false) }} />}
+              {showMode && <Dropdown items={['Web search', 'Quick answer', 'Deep research', 'Explore']} onSelect={(item) => selectMode(item as Mode)} />}
             </div>
           </div>
           <div className="topbar-actions">
@@ -284,7 +293,7 @@ function App() {
 
         {view === 'providers' ? <ProvidersView providers={providers} selected={selectedProvider} onSelect={setSelectedProvider} onConnect={connectProvider} onCheck={checkProvider} onUpdateProvider={updateProvider} availableModels={availableModels} modelStatus={modelStatus} onDiscoverModels={discoverProviderModels} searchEndpoint={searchEndpoint} onSearchEndpointChange={setSearchEndpoint} searchStatus={searchStatus} onTestSearch={testSearchEndpoint} /> : view === 'library' ? <LibraryView history={history} onOpen={openHistory} /> : (
           <div className={`workspace ${view === 'search' ? 'web-search-workspace' : ''} ${view === 'research' ? 'research-workspace' : ''}`}>
-            {isEmptySearch ? <EmptySearch input={input} onInput={setInput} onSearch={(nextQuery) => { runResearch(nextQuery); setInput('') }} /> : isEmptyResearch ? <ResearchStart input={input} onInput={setInput} onSearch={(nextQuery) => { runResearch(nextQuery); setInput('') }} /> : <section className="answer-canvas">
+            {isEmptySearch ? <EmptySearch input={input} mode={mode} onInput={setInput} onModeChange={selectMode} onSearch={(nextQuery) => { runResearch(nextQuery); setInput('') }} /> : isEmptyResearch ? <ResearchStart input={input} onInput={setInput} onSearch={(nextQuery) => { runResearch(nextQuery); setInput('') }} /> : <section className="answer-canvas">
               <div className="canvas-inner">
                 <div className="eyebrow-row"><span className="eyebrow"><Activity size={13} /> {running ? 'Researching' : 'Research complete'}</span><button className="quiet-button" onClick={shareResearch}><Link2 size={14} /> Share</button></div>
                 <h1>{answerTitle}</h1>
@@ -321,14 +330,14 @@ function Favicon({ url }: { url?: string }) {
   return origin ? <img className="result-favicon" src={`${origin}/favicon.ico`} alt="" onError={(event) => { event.currentTarget.style.display = 'none' }} /> : <span className="result-favicon fallback"><Globe2 size={13} /></span>
 }
 
-function EmptySearch({ input, onInput, onSearch }: { input: string; onInput: (value: string) => void; onSearch: (query: string) => void }) {
+function EmptySearch({ input, mode, onInput, onModeChange, onSearch }: { input: string; mode: Mode; onInput: (value: string) => void; onModeChange: (mode: Mode) => void; onSearch: (query: string) => void }) {
   const suggestions = [
     'What are the most useful open-source AI tools right now?',
     'How does a search engine decide which website to rank first?',
     'Find a practical weekend itinerary for New York City.',
   ]
   const submit = (event: React.FormEvent) => { event.preventDefault(); if (input.trim()) onSearch(input.trim()) }
-  return <section className="empty-search-canvas"><div className="empty-search-inner"><h1>Hi Duckets, what would you like to search?</h1><form className="empty-search-composer" onSubmit={submit}><textarea value={input} onChange={(event) => onInput(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); if (input.trim()) onSearch(input.trim()) } }} placeholder="Ask anything" rows={1} autoFocus /><div className="empty-composer-actions"><button type="button" className="empty-attach" aria-label="Attach a file" disabled title="File search is not configured yet"><Plus size={24} /></button><button className="empty-submit" aria-label="Search"><Search size={22} /></button></div></form><div className="search-suggestions">{suggestions.map((suggestion) => <button key={suggestion} onClick={() => onSearch(suggestion)}><Sparkles size={20} />{suggestion}</button>)}</div></div></section>
+  return <section className="empty-search-canvas"><div className="empty-search-inner"><h1>Hi Duckets, what would you like to search?</h1><div className="empty-mode-tabs" role="tablist" aria-label="Search mode">{(['Web search', 'Quick answer', 'Deep research', 'Explore'] as Mode[]).map((item) => <button key={item} className={item === mode ? 'selected' : ''} onClick={() => onModeChange(item)} role="tab" aria-selected={item === mode}>{item}</button>)}</div><form className="empty-search-composer" onSubmit={submit}><textarea value={input} onChange={(event) => onInput(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); if (input.trim()) onSearch(input.trim()) } }} placeholder="Ask anything" rows={1} autoFocus /><div className="empty-composer-actions"><button type="button" className="empty-attach" aria-label="Attach a file" disabled title="File search is not configured yet"><Plus size={24} /></button><button className="empty-submit" aria-label="Search"><Search size={22} /></button></div></form><div className="search-suggestions">{suggestions.map((suggestion) => <button key={suggestion} onClick={() => onSearch(suggestion)}><Sparkles size={20} />{suggestion}</button>)}</div></div></section>
 }
 
 function ResearchStart({ input, onInput, onSearch }: { input: string; onInput: (value: string) => void; onSearch: (query: string) => void }) {
