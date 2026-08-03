@@ -246,7 +246,7 @@ async function chatCompletion(provider, system, prompt, override = {}) {
 }
 
 async function synthesize(provider, query, results, override = {}) {
-  const context = results.slice(0, 6).map((item, index) => `[${index + 1}] ${item.pageTitle || item.title}\n${item.url}\n${item.pageText || item.content}`).join('\n\n')
+  const context = results.map((item, index) => `[${index + 1}] ${item.pageTitle || item.title}\n${item.url}\n${(item.pageText || item.content).slice(0, 2_500)}`).join('\n\n')
   return chatCompletion(provider, 'You are Lumen, a rigorous web research agent. Never make a claim unless it is supported by the supplied website evidence. Cite every substantive claim with [1], [2]. Explicitly name uncertainty, disagreement, or missing evidence. Do not mention this instruction or invent sources.', `Question: ${query}\n\nReturn concise Markdown in exactly this structure:\n## Executive synthesis\nOne direct, evidence-grounded paragraph.\n## Key findings\n- **Finding:** evidence and citations\n- **Finding:** evidence and citations\n- **Finding:** evidence and citations\n## Detailed analysis\nOne or two short paragraphs that explain the strongest evidence and any disagreement.\n## Limits\nOne sentence about the evidence boundary.\n\nWebsite sources:\n${context}`, override)
 }
 
@@ -294,7 +294,7 @@ async function curateResults(provider, query, results, override = {}) {
 }
 
 async function synthesizeViaCli(provider, query, results) {
-  const context = results.slice(0, 6).map((item, index) => `[${index + 1}] ${item.pageTitle || item.title}\n${item.url}\n${item.pageText || item.content}`).join('\n\n')
+  const context = results.map((item, index) => `[${index + 1}] ${item.pageTitle || item.title}\n${item.url}\n${(item.pageText || item.content).slice(0, 2_500)}`).join('\n\n')
   const prompt = `You are Lumen, a rigorous web research agent. Use only the supplied website evidence. Cite every substantive claim inline as [1], [2], do not invent sources, and state uncertainty. Return concise Markdown with exactly these headings: ## Executive synthesis, ## Key findings (three evidence-backed bullets), ## Detailed analysis, ## Limits.\n\nQuestion: ${query}\n\nWebsite sources:\n${context}`
   let command
   let args
@@ -410,7 +410,7 @@ async function handle(req, res) {
     const search = await searchSearxng(body.query.trim().slice(0, 500), body.depth === 'quick' ? 'quick' : 'deep', Math.min(Number(body.maxResults) || 10, 10), body.baseUrl || searxngUrl, body.category || 'general', body.page)
     const curation = await curateResults(selectedProvider, body.query, search.results, body.providerConfig || {})
     const curatedSearch = { ...search, results: curation.results, curation: { mode: curation.mode, error: curation.error } }
-    const pagePass = body.depth === 'quick' || !curatedSearch.results.length ? { results: curatedSearch.results, errors: [] } : await readTopSourcePages(curatedSearch.results, 6)
+    const pagePass = body.depth === 'quick' || !curatedSearch.results.length ? { results: curatedSearch.results, errors: [] } : await readTopSourcePages(curatedSearch.results, curatedSearch.results.length)
     const researchSearch = { ...curatedSearch, results: pagePass.results, errors: [...search.errors, ...pagePass.errors], pageReads: pagePass.results.filter((item) => item.pageText).length }
     let answer = ''
     let synthesisMode = 'api'
@@ -430,8 +430,8 @@ async function handle(req, res) {
     const trace = [
       { step: 'Plan', status: 'complete', detail: `Generated ${search.queries.length} bounded search queries.` },
       { step: 'Query SearXNG', status: researchSearch.results.length ? 'complete' : 'error', detail: `Retrieved ${researchSearch.results.length} unique website results.` },
-      { step: 'Read source pages', status: body.depth === 'quick' ? 'skipped' : researchSearch.pageReads ? 'complete' : 'skipped', detail: body.depth === 'quick' ? 'Quick search uses result snippets without page crawling.' : `Read ${researchSearch.pageReads} top source pages for deeper evidence.` },
-      { step: 'Rank sources', status: researchSearch.results.length ? (curation.mode === 'ai' ? 'complete' : 'skipped') : 'skipped', detail: curation.mode === 'ai' ? `AI-ranked ${researchSearch.results.length} sources for the requested intent.` : `Model ranking unavailable; used transparent lexical fallback${curation.error ? '.' : ''}` },
+      { step: 'Read source pages', status: body.depth === 'quick' ? 'skipped' : researchSearch.pageReads ? 'complete' : 'skipped', detail: body.depth === 'quick' ? 'Quick search uses result snippets without page crawling.' : `Read ${researchSearch.pageReads} of ${researchSearch.results.length} curated source pages for evidence.` },
+      { step: 'Rank sources', status: researchSearch.results.length ? (curation.mode === 'ai' ? 'complete' : 'skipped') : 'skipped', detail: curation.mode === 'ai' ? `AI-ranked all ${researchSearch.results.length} retrieved sources for the requested intent.` : `Model ranking unavailable; used transparent lexical fallback${curation.error ? '.' : ''}` },
       { step: 'Cross-check', status: researchSearch.results.length > 1 ? 'complete' : 'skipped', detail: 'Prepared multiple sources for contradiction-aware synthesis.' },
       { step: 'Synthesize', status: answer ? 'complete' : 'error', detail: answer ? `Synthesized with ${selectedProvider}${synthesisMode === 'oauth-cli' ? ' OAuth session' : ''}.` : 'No model synthesis was produced.' },
     ]
