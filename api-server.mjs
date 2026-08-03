@@ -364,10 +364,10 @@ async function handle(req, res) {
   if (req.method === 'GET' && url.pathname === '/api/health') return json(res, 200, { ok: true, service: 'lumen-api', searxng: searxngUrl })
   if (req.method === 'GET' && url.pathname === '/api/providers') return json(res, 200, { providers: Object.keys(providerCommands) })
   if (req.method === 'GET' && url.pathname === '/api/models') {
+    const provider = modelRuntimes[url.searchParams.get('provider')] ? url.searchParams.get('provider') : 'lmstudio'
     try {
-      const provider = modelRuntimes[url.searchParams.get('provider')] ? url.searchParams.get('provider') : 'lmstudio'
       return json(res, 200, { provider, ...(await discoverModels(provider, url.searchParams.get('endpoint') || undefined)) })
-    } catch (error) { return json(res, 502, { error: error.message }) }
+    } catch (error) { return json(res, 200, { provider, models: [], error: error.message }) }
   }
   if (req.method === 'GET' && url.pathname === '/api/agents') {
     const statuses = await Promise.all(Object.entries(agentCommands).map(async ([id, command]) => ({ id, command, ...(await commandProbe(command)) })))

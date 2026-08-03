@@ -123,7 +123,7 @@ function App() {
     try {
       const response = await fetch(`/api/models?provider=${encodeURIComponent(id)}&endpoint=${encodeURIComponent(target.endpoint)}`)
       const payload = await response.json()
-      if (!response.ok) throw new Error(payload.error || 'Model discovery failed')
+      if (!response.ok || payload.error) throw new Error(payload.error || 'Model discovery failed')
       const models = Array.isArray(payload.models) ? payload.models : []
       setAvailableModels((current) => ({ ...current, [id]: models }))
       setModelStatus((current) => ({ ...current, [id]: models.length ? `${models.length} model${models.length === 1 ? '' : 's'} available` : 'No language models found' }))
