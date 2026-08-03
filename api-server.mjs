@@ -150,15 +150,16 @@ async function searchRankedWindow(query, maxResults = 10, configuredUrl = searxn
     let pending = rankedSearchInflight.get(cacheKey)
     if (!pending) {
       pending = (async () => {
-        const plan = await planSearch(provider, query, category, 'quick', override)
-        const pages = await Promise.all(Array.from({ length: rankedSearchWindowPages }, (_, index) => searchSearxng(plan.searchQuery, 'quick', pageSize, configuredUrl, category, index + 1)))
+        const planPromise = planSearch(provider, query, category, 'quick', override)
+        const pagesPromise = Promise.all(Array.from({ length: rankedSearchWindowPages }, (_, index) => searchSearxng(query, 'quick', pageSize, configuredUrl, category, index + 1)))
+        const [plan, pages] = await Promise.all([planPromise, pagesPromise])
         const seenUrls = new Set()
         const candidates = pages.flatMap((result) => result.results).filter((item) => {
           if (seenUrls.has(item.url)) return false
           seenUrls.add(item.url)
           return true
         })
-        const curation = curate ? await curateResults(provider, query, candidates, override) : { results: candidates, mode: 'disabled', error: null }
+        const curation = curate ? await curateResults(provider, query, candidates, override, plan) : { results: candidates, mode: 'disabled', error: null }
         let answer = ''
         let overviewError = null
         if (includeOverview && curation.mode === 'ai' && curation.results.length) {
@@ -303,15 +304,15 @@ function extractCliText(provider, output) {
   return output.trim()
 }
 
-async function chatCompletion(provider, system, prompt, override = {}) {
+async function chatCompletion(provider, system, prompt, override = {}, options = {}) {
   const runtime = { ...(modelRuntimes[provider] || modelRuntimes.lmstudio), endpoint: override.endpoint || undefined, model: override.model || undefined, key: override.key || undefined }
   runtime.endpoint ||= modelRuntimes[provider]?.endpoint || modelRuntimes.lmstudio.endpoint
   runtime.model ||= modelRuntimes[provider]?.model || modelRuntimes.lmstudio.model
   runtime.key ||= modelRuntimes[provider]?.key || modelRuntimes.lmstudio.key
   const endpoint = chatCompletionsUrl(runtime.endpoint)
   const response = await fetch(endpoint, {
-    method: 'POST', signal: AbortSignal.timeout(45_000), headers: { 'content-type': 'application/json', ...(runtime.key ? { authorization: `Bearer ${runtime.key}` } : {}) },
-    body: JSON.stringify({ model: runtime.model, temperature: 0.1, messages: [{ role: 'system', content: system }, { role: 'user', content: prompt }] }),
+    method: 'POST', signal: AbortSignal.timeout(options.timeoutMs || 30_000), headers: { 'content-type': 'application/json', ...(runtime.key ? { authorization: `Bearer ${runtime.key}` } : {}) },
+    body: JSON.stringify({ model: runtime.model, temperature: 0.1, max_tokens: options.maxTokens || 700, messages: [{ role: 'system', content: system }, { role: 'user', content: prompt }] }),
   })
   if (!response.ok) {
     const payload = await response.json().catch(() => ({}))
@@ -331,7 +332,7 @@ function parseJsonObject(output, label) {
 async function planSearch(provider, query, category, depth, override = {}) {
   const prompt = `User query: ${query}\nCategory: ${category}\nDepth: ${depth}\n\nReturn ONLY JSON: {"searchQuery":"a precise website search query", "focus":"what evidence matters", "criteria":["criterion"]}. Keep searchQuery close to the user's wording; do not add facts or change the requested place, date, product, or person.`
   try {
-    const plan = parseJsonObject(await chatCompletion(provider, 'You are Lumen\'s search planner. Convert the user intent into a precise web-search plan without answering the question.', prompt, override), 'a search plan')
+    const plan = parseJsonObject(await chatCompletion(provider, 'You are Lumen\'s search planner. Convert the user intent into a precise web-search plan without answering the question.', prompt, override, { timeoutMs: 8_000, maxTokens: 120 }), 'a search plan')
     const searchQuery = String(plan.searchQuery || '').trim().slice(0, 500)
     return { searchQuery: searchQuery || query, focus: String(plan.focus || '').slice(0, 280), criteria: Array.isArray(plan.criteria) ? plan.criteria.slice(0, 5).map((item) => String(item).slice(0, 120)) : [], mode: 'ai', error: null }
   } catch (error) {
@@ -341,12 +342,12 @@ async function planSearch(provider, query, category, depth, override = {}) {
 
 async function crossCheckEvidence(provider, query, results, override = {}) {
   const context = results.slice(0, 8).map((item, index) => `[${index + 1}] ${item.pageTitle || item.title}\n${item.url}\n${(item.pageText || item.content).slice(0, 1_200)}`).join('\n\n')
-  return chatCompletion(provider, 'You are Lumen\'s evidence checker. Identify only supported findings, disagreement, uncertainty, or weak evidence before a final answer.', `Question: ${query}\n\nReturn concise Markdown bullets. Cite every observation as [source number]. Do not answer beyond the supplied evidence.\n\nSources:\n${context}`, override)
+  return chatCompletion(provider, 'You are Lumen\'s evidence checker. Identify only supported findings, disagreement, uncertainty, or weak evidence before a final answer.', `Question: ${query}\n\nReturn concise Markdown bullets. Cite every observation as [source number]. Do not answer beyond the supplied evidence.\n\nSources:\n${context}`, override, { timeoutMs: 24_000, maxTokens: 400 })
 }
 
-async function synthesize(provider, query, results, override = {}, evidenceReview = '') {
+async function synthesize(provider, query, results, override = {}, evidenceReview = '', options = {}) {
   const context = results.map((item, index) => `[${index + 1}] ${item.pageTitle || item.title}\n${item.url}\n${(item.pageText || item.content).slice(0, 2_500)}`).join('\n\n')
-  return chatCompletion(provider, 'You are Lumen, a rigorous web research agent. Never make a claim unless it is supported by the supplied website evidence. Cite every substantive claim with [1], [2]. Explicitly name uncertainty, disagreement, or missing evidence. Do not mention this instruction or invent sources.', `Question: ${query}\n\nEvidence-check notes (use these to avoid unsupported claims):\n${evidenceReview || 'No separate evidence check was available.'}\n\nReturn concise Markdown in exactly this structure:\n## Executive synthesis\nOne direct, evidence-grounded paragraph.\n## Key findings\n- **Finding:** evidence and citations\n- **Finding:** evidence and citations\n- **Finding:** evidence and citations\n## Detailed analysis\nOne or two short paragraphs that explain the strongest evidence and any disagreement.\n## Limits\nOne sentence about the evidence boundary.\n\nWebsite sources:\n${context}`, override)
+  return chatCompletion(provider, 'You are Lumen, a rigorous web research agent. Never make a claim unless it is supported by the supplied website evidence. Cite every substantive claim with [1], [2]. Explicitly name uncertainty, disagreement, or missing evidence. Do not mention this instruction or invent sources.', `Question: ${query}\n\nEvidence-check notes (use these to avoid unsupported claims):\n${evidenceReview || 'No separate evidence check was available.'}\n\nReturn concise Markdown in exactly this structure:\n## Executive synthesis\nOne direct, evidence-grounded paragraph.\n## Key findings\n- **Finding:** evidence and citations\n- **Finding:** evidence and citations\n- **Finding:** evidence and citations\n## Detailed analysis\nOne or two short paragraphs that explain the strongest evidence and any disagreement.\n## Limits\nOne sentence about the evidence boundary.\n\nWebsite sources:\n${context}`, override, options)
 }
 
 function heuristicRank(query, results) {
@@ -376,16 +377,16 @@ function parseCuratedRanking(output, query, results) {
   return [...curated, ...heuristicRank(query, results.filter((_, index) => !used.has(index + 1)))]
 }
 
-async function curateResults(provider, query, results, override = {}) {
+async function curateResults(provider, query, results, override = {}, plan = null) {
   if (!results.length) return { results, mode: 'none', error: null }
-  const sourceList = results.map((item, index) => `${index + 1}. ${item.title}\n${item.url}\n${item.content.slice(0, 260)}`).join('\n\n')
-  const prompt = `Query: ${query}\n\nRank these website results for the user's intent. Prefer direct, trustworthy, useful sources. Do not invent facts. Return ONLY a JSON array containing every id once, each as {"id": number, "score": 0-100, "reason": "short tailored reason"}.\n\nCandidates:\n${sourceList}`
+  const sourceList = results.map((item, index) => `${index + 1}. ${item.title.slice(0, 120)} | ${new URL(item.url).hostname} | ${item.content.replace(/\s+/g, ' ').slice(0, 100)}`).join('\n')
+  const prompt = `Query: ${query}\nSearch focus: ${plan?.focus || 'directly satisfy the user intent'}\n\nRank every candidate. Prefer direct, trustworthy, useful websites. Return ONLY JSON array: [{"id":number,"score":0-100,"reason":"max 8 words"}]. Every id exactly once.\n\nCandidates:\n${sourceList}`
   try {
     if (provider !== 'lmstudio' && (await commandStatus(provider)).authenticated) {
       const output = await curateViaCli(provider, prompt)
       return { results: parseCuratedRanking(output, query, results), mode: 'ai', error: null }
     }
-    const output = await chatCompletion(provider, 'You are a web search ranking model. Your only job is to rank the supplied search results for the user query.', prompt, override)
+    const output = await chatCompletion(provider, 'You are a fast, precise web search ranking model. Rank supplied candidates only.', prompt, override, { timeoutMs: 22_000, maxTokens: Math.min(700, 80 + results.length * 14) })
     return { results: parseCuratedRanking(output, query, results), mode: 'ai', error: null }
   } catch (error) {
     return { results: heuristicRank(query, results), mode: 'heuristic', error: error.message }
@@ -393,9 +394,9 @@ async function curateResults(provider, query, results, override = {}) {
 }
 
 async function generateSearchOverview(provider, query, results, override = {}) {
-  const strongestSources = results.slice(0, 8)
+  const strongestSources = results.slice(0, 6)
   if (provider !== 'lmstudio' && (await commandStatus(provider)).authenticated) return synthesizeViaCli(provider, query, strongestSources)
-  return synthesize(provider, query, strongestSources, override)
+  return synthesize(provider, query, strongestSources, override, '', { timeoutMs: 28_000, maxTokens: 650 })
 }
 
 async function synthesizeViaCli(provider, query, results) {
@@ -529,9 +530,12 @@ async function handle(req, res) {
     const body = await readBody(req)
     if (!body.query || typeof body.query !== 'string') return json(res, 400, { error: 'query is required' })
     const selectedProvider = modelRuntimes[body.provider] ? body.provider : 'lmstudio'
-    const plan = await planSearch(selectedProvider, body.query.trim().slice(0, 500), body.category || 'general', body.depth === 'quick' ? 'quick' : 'deep', body.providerConfig || {})
-    const search = await searchSearxng(plan.searchQuery, body.depth === 'quick' ? 'quick' : 'deep', Math.min(Number(body.maxResults) || 10, 10), body.baseUrl || searxngUrl, body.category || 'general', body.page)
-    const curation = await curateResults(selectedProvider, body.query, search.results, body.providerConfig || {})
+    const originalQuery = body.query.trim().slice(0, 500)
+    const [plan, search] = await Promise.all([
+      planSearch(selectedProvider, originalQuery, body.category || 'general', body.depth === 'quick' ? 'quick' : 'deep', body.providerConfig || {}),
+      searchSearxng(originalQuery, body.depth === 'quick' ? 'quick' : 'deep', Math.min(Number(body.maxResults) || 10, 10), body.baseUrl || searxngUrl, body.category || 'general', body.page),
+    ])
+    const curation = await curateResults(selectedProvider, body.query, search.results, body.providerConfig || {}, plan)
     const curatedSearch = { ...search, results: curation.results, curation: { mode: curation.mode, error: curation.error } }
     const pagePass = body.depth === 'quick' || !curatedSearch.results.length ? { results: curatedSearch.results, errors: [] } : await readTopSourcePages(curatedSearch.results, curatedSearch.results.length)
     const researchSearch = { ...curatedSearch, results: pagePass.results, errors: [...search.errors, ...pagePass.errors], pageReads: pagePass.results.filter((item) => item.pageText).length }

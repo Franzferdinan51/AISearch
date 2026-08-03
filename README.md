@@ -26,6 +26,8 @@ The browser runs on Vite and proxies `/api` to the local orchestration API. The 
 
 SearXNG must allow JSON output and respond at `/search?format=json`. The deep-research route is bounded to three focused queries, deduplicates URLs, caches results for five minutes, AI-ranks the retrieved set, and reads every reachable source page with timeouts before synthesis. Quick scoped search stays snippet-first and does not crawl pages.
 
+For local models, Lumen overlaps SearXNG retrieval with the AI planning step and uses compact, bounded prompts for planning, ranking, evidence checks, and overviews. This keeps all agent stages active while preventing a slow local model from blocking the whole search on oversized prompts.
+
 `npm run searxng` starts the bundled SearXNG container on `http://127.0.0.1:8080`. Lumen returns normal web pages, documentation, GitHub repositories, news, and other engine results from SearXNG; it does not restrict retrieval to academic sources.
 
 For a production-like local stack, run `docker compose up --build`. Lumen is served at `http://127.0.0.1:3000` and reaches the bundled SearXNG service over the private Compose network.
