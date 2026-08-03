@@ -44,6 +44,27 @@ function safeUrl(raw) {
   return parsed
 }
 
+async function discoverModels(provider, endpoint) {
+  const configured = safeUrl(endpoint || modelRuntimes[provider]?.endpoint || modelRuntimes.lmstudio.endpoint)
+  const headers = { accept: 'application/json', ...(modelRuntimes[provider]?.key ? { authorization: `Bearer ${modelRuntimes[provider].key}` } : {}) }
+  const paths = provider === 'lmstudio' ? ['/api/v1/models', '/v1/models'] : ['/models']
+  const errors = []
+  for (const pathname of paths) {
+    try {
+      const url = new URL(pathname, configured)
+      const response = await fetch(url, { signal: AbortSignal.timeout(8_000), headers })
+      if (!response.ok) throw new Error(`${response.status} ${response.statusText}`)
+      const payload = await response.json()
+      const candidates = Array.isArray(payload.models) ? payload.models : Array.isArray(payload.data) ? payload.data : []
+      const models = candidates.filter((item) => !item.type || item.type === 'llm').map((item) => ({ id: item.key || item.id || item.model_id || item.display_name, label: item.display_name || item.name || item.key || item.id, architecture: item.architecture || null, quantization: item.quantization?.name || item.quantization || null })).filter((item) => item.id)
+      return { models, endpoint: url.toString(), source: pathname }
+    } catch (error) { errors.push(error.message) }
+  }
+  const detail = errors.join(' · ')
+  if (provider === 'lmstudio' && /401|403/.test(detail)) throw new Error('Could not load models: LM Studio requires a server token. Start Lumen with LM_API_TOKEN and refresh.')
+  throw new Error(`Could not load models: ${detail}`)
+}
+
 function queriesFor(query, depth) {
   if (depth !== 'deep') return [query]
   return [query, `${query} technical report`, `${query} latest developments`]
@@ -319,6 +340,12 @@ async function handle(req, res) {
   if (req.method === 'GET' && !url.pathname.startsWith('/api/')) return serveStatic(url.pathname, res)
   if (req.method === 'GET' && url.pathname === '/api/health') return json(res, 200, { ok: true, service: 'lumen-api', searxng: searxngUrl })
   if (req.method === 'GET' && url.pathname === '/api/providers') return json(res, 200, { providers: Object.keys(providerCommands) })
+  if (req.method === 'GET' && url.pathname === '/api/models') {
+    try {
+      const provider = modelRuntimes[url.searchParams.get('provider')] ? url.searchParams.get('provider') : 'lmstudio'
+      return json(res, 200, { provider, ...(await discoverModels(provider, url.searchParams.get('endpoint') || undefined)) })
+    } catch (error) { return json(res, 502, { error: error.message }) }
+  }
   if (req.method === 'GET' && url.pathname === '/api/agents') {
     const statuses = await Promise.all(Object.entries(agentCommands).map(async ([id, command]) => ({ id, command, ...(await commandProbe(command)) })))
     return json(res, 200, { agents: statuses })

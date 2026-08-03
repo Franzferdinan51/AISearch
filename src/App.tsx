@@ -13,6 +13,7 @@ import Menu from 'lucide-react/dist/esm/icons/menu.mjs'
 import Paperclip from 'lucide-react/dist/esm/icons/paperclip.mjs'
 import PlugZap from 'lucide-react/dist/esm/icons/plug-zap.mjs'
 import Plus from 'lucide-react/dist/esm/icons/plus.mjs'
+import RefreshCw from 'lucide-react/dist/esm/icons/refresh-cw.mjs'
 import Search from 'lucide-react/dist/esm/icons/search.mjs'
 import Send from 'lucide-react/dist/esm/icons/send.mjs'
 import Settings from 'lucide-react/dist/esm/icons/settings.mjs'
@@ -23,6 +24,7 @@ import X from 'lucide-react/dist/esm/icons/x.mjs'
 type Mode = 'Web search' | 'Quick answer' | 'Deep research' | 'Explore'
 type SearchCategory = 'general' | 'news' | 'science'
 type Provider = { id: string; name: string; model: string; endpoint: string; kind: string; connected: boolean; authPending?: boolean; color: string }
+type ModelOption = { id: string; label: string; architecture?: string | null; quantization?: string | null }
 
 const initialProviders: Provider[] = [
   { id: 'lmstudio', name: 'LM Studio', model: 'Qwen 3 30B', endpoint: 'http://localhost:1234/v1', kind: 'Local', connected: true, color: '#7b6af0' },
@@ -50,6 +52,8 @@ function App() {
   const [searchCategory, setSearchCategory] = useState<SearchCategory>('general')
   const [searchEndpoint, setSearchEndpoint] = useState(() => localStorage.getItem('lumen-search-endpoint') || 'http://127.0.0.1:8080')
   const [searchStatus, setSearchStatus] = useState('')
+  const [availableModels, setAvailableModels] = useState<Record<string, ModelOption[]>>({})
+  const [modelStatus, setModelStatus] = useState<Record<string, string>>({})
   const [query, setQuery] = useState('')
   const [input, setInput] = useState('')
   const [running, setRunning] = useState(false)
@@ -96,6 +100,23 @@ function App() {
   useEffect(() => localStorage.setItem('lumen-providers', JSON.stringify(providers)), [providers])
   useEffect(() => localStorage.setItem('lumen-search-endpoint', searchEndpoint), [searchEndpoint])
   useEffect(() => localStorage.setItem('lumen-history', JSON.stringify(history.slice(0, 20))), [history])
+
+  const discoverProviderModels = async (id: string) => {
+    const target = providers.find((item) => item.id === id)
+    if (!target) return
+    setModelStatus((current) => ({ ...current, [id]: 'Loading models…' }))
+    try {
+      const response = await fetch(`/api/models?provider=${encodeURIComponent(id)}&endpoint=${encodeURIComponent(target.endpoint)}`)
+      const payload = await response.json()
+      if (!response.ok) throw new Error(payload.error || 'Model discovery failed')
+      const models = Array.isArray(payload.models) ? payload.models : []
+      setAvailableModels((current) => ({ ...current, [id]: models }))
+      setModelStatus((current) => ({ ...current, [id]: models.length ? `${models.length} model${models.length === 1 ? '' : 's'} available` : 'No language models found' }))
+      if (models.length && !models.some((model: ModelOption) => model.id === target.model)) updateProvider(id, 'model', models[0].id)
+    } catch (error) { setModelStatus((current) => ({ ...current, [id]: error instanceof Error ? error.message : 'Could not load models' })) }
+  }
+
+  useEffect(() => { discoverProviderModels('lmstudio') }, [])
 
   const runResearch = async (nextQuery = query, nextCategory = searchCategory) => {
     if (!nextQuery.trim()) return
@@ -220,7 +241,7 @@ function App() {
           </div>
         </header>
 
-        {view === 'providers' ? <ProvidersView providers={providers} selected={selectedProvider} onConnect={connectProvider} onCheck={checkProvider} onUpdateProvider={updateProvider} searchEndpoint={searchEndpoint} onSearchEndpointChange={setSearchEndpoint} searchStatus={searchStatus} onTestSearch={testSearchEndpoint} /> : view === 'library' ? <LibraryView history={history} onOpen={openHistory} /> : (
+        {view === 'providers' ? <ProvidersView providers={providers} selected={selectedProvider} onSelect={setSelectedProvider} onConnect={connectProvider} onCheck={checkProvider} onUpdateProvider={updateProvider} availableModels={availableModels} modelStatus={modelStatus} onDiscoverModels={discoverProviderModels} searchEndpoint={searchEndpoint} onSearchEndpointChange={setSearchEndpoint} searchStatus={searchStatus} onTestSearch={testSearchEndpoint} /> : view === 'library' ? <LibraryView history={history} onOpen={openHistory} /> : (
           <div className={`workspace ${view === 'search' ? 'web-search-workspace' : ''}`}>
             {isEmptySearch ? <EmptySearch input={input} onInput={setInput} onSearch={(nextQuery) => { runResearch(nextQuery); setInput('') }} /> : isEmptyResearch ? <ResearchStart input={input} onInput={setInput} onSearch={(nextQuery) => { runResearch(nextQuery); setInput('') }} /> : <section className="answer-canvas">
               <div className="canvas-inner">
@@ -288,7 +309,28 @@ function TracePanel({ running, step, trace, compact = false }: { running: boolea
 }
 function ConnectedCard({ label, sub, icon }: { label: string; sub: string; icon: string }) { return <div className="connected-card"><span className={`connected-icon ${icon}`}>{icon === 'search' ? <Search size={18} /> : icon === 'lm' ? <Sparkles size={16} /> : 'V'}</span><span><strong>{label}</strong><small>{sub}</small></span><span className="connected"><Check size={11} /> Connected</span><ChevronRight size={17} /></div> }
 
-  function ProvidersView({ providers, selected, onConnect, onCheck, onUpdateProvider, searchEndpoint, onSearchEndpointChange, searchStatus, onTestSearch }: { providers: Provider[]; selected: string; onConnect: (id: string) => void; onCheck: (id: string) => void; onUpdateProvider: (id: string, field: 'endpoint' | 'model', value: string) => void; searchEndpoint: string; onSearchEndpointChange: (value: string) => void; searchStatus: string; onTestSearch: () => void }) { return <div className="settings-view"><div className="settings-heading"><div><span className="section-kicker">Connections</span><h1>Providers</h1><p>Choose where Lumen reasons. Credentials stay in the local session and never enter the browser UI.</p></div><button className="primary-button"><Plus size={16} /> Add provider</button></div><div className="search-provider-card"><div><span className="provider-kind">Web search</span><h2>SearXNG</h2><p>Private metasearch for websites, documentation, GitHub, news, and more.</p></div><div className="search-endpoint-row"><label htmlFor="searxng-url">Instance URL</label><input id="searxng-url" value={searchEndpoint} onChange={(event) => onSearchEndpointChange(event.target.value)} /><button className="connect-button" onClick={onTestSearch}>Test connection</button></div>{searchStatus && <small className="search-status">{searchStatus}</small>}</div><div className="provider-grid">{providers.map((provider) => <div className={`provider-card ${selected === provider.id ? 'selected' : ''}`} key={provider.id}><div className="provider-card-top"><ProviderIcon provider={provider} /><span className="provider-kind">{provider.kind}</span></div><h2>{provider.name}</h2><p>{provider.id === 'lmstudio' ? 'Local inference with automatic model discovery.' : `OAuth session for ${provider.name} models.`}</p><div className="provider-field"><small>Endpoint</small><input className="provider-edit" value={provider.endpoint} onChange={(event) => onUpdateProvider(provider.id, 'endpoint', event.target.value)} /></div><div className="provider-field"><small>Model</small><input className="provider-edit" value={provider.model} onChange={(event) => onUpdateProvider(provider.id, 'model', event.target.value)} /></div><button className={`connect-button ${provider.connected ? 'connected-button' : ''}`} onClick={() => provider.connected ? undefined : provider.authPending ? onCheck(provider.id) : onConnect(provider.id)}>{provider.connected ? <><Check size={15} /> Connected</> : provider.authPending ? <>Check OAuth session <Settings size={14} /></> : <>Connect with OAuth <ArrowUpRight size={15} /></>}</button></div>)}</div><div className="security-note"><CircleHelp size={17} /><span><strong>OAuth is handled by local CLI sessions</strong><br />Following the Prediction pattern, Lumen exposes install/auth state only. Tokens are never returned to the browser or persisted in localStorage.</span></div></div> }
+  function ProvidersView({ providers, selected, onSelect, onConnect, onCheck, onUpdateProvider, availableModels, modelStatus, onDiscoverModels, searchEndpoint, onSearchEndpointChange, searchStatus, onTestSearch }: { providers: Provider[]; selected: string; onSelect: (id: string) => void; onConnect: (id: string) => void; onCheck: (id: string) => void; onUpdateProvider: (id: string, field: 'endpoint' | 'model', value: string) => void; availableModels: Record<string, ModelOption[]>; modelStatus: Record<string, string>; onDiscoverModels: (id: string) => void; searchEndpoint: string; onSearchEndpointChange: (value: string) => void; searchStatus: string; onTestSearch: () => void }) {
+    return <div className="settings-view">
+      <div className="settings-heading"><div><span className="section-kicker">Connections</span><h1>Providers</h1><p>Choose the model that curates your web results. Credentials stay in the local session and never enter the browser UI.</p></div><button className="primary-button"><Plus size={16} /> Add provider</button></div>
+      <div className="search-provider-card"><div><span className="provider-kind">Web search</span><h2>SearXNG</h2><p>Private metasearch for websites, documentation, GitHub, news, and more.</p></div><div className="search-endpoint-row"><label htmlFor="searxng-url">Instance URL</label><input id="searxng-url" value={searchEndpoint} onChange={(event) => onSearchEndpointChange(event.target.value)} /><button className="connect-button" onClick={onTestSearch}>Test connection</button></div>{searchStatus && <small className="search-status">{searchStatus}</small>}</div>
+      <div className="provider-grid">{providers.map((provider) => {
+        const models = availableModels[provider.id] || []
+        const hasDiscoveredModels = models.length > 0
+        const currentMissing = hasDiscoveredModels && !models.some((model) => model.id === provider.model)
+        return <div className={`provider-card ${selected === provider.id ? 'selected' : ''}`} key={provider.id}>
+          <div className="provider-card-top"><ProviderIcon provider={provider} /><span className="provider-kind">{selected === provider.id ? 'Active for search' : provider.kind}</span></div>
+          <h2>{provider.name}</h2>
+          <p>{provider.id === 'lmstudio' ? 'Choose from models available on your local LM Studio server.' : `OAuth session for ${provider.name} models.`}</p>
+          <div className="provider-field"><small>Endpoint</small><input className="provider-edit" aria-label={`${provider.name} endpoint`} value={provider.endpoint} onChange={(event) => onUpdateProvider(provider.id, 'endpoint', event.target.value)} /></div>
+          <div className="provider-field provider-model-field"><small>Active model</small>{hasDiscoveredModels ? <select className="provider-model-select" aria-label={`${provider.name} model`} value={provider.model} onChange={(event) => { onUpdateProvider(provider.id, 'model', event.target.value); onSelect(provider.id) }}><option value={provider.model} hidden={!currentMissing}>{provider.model}{currentMissing ? ' (current)' : ''}</option>{models.map((model) => <option key={model.id} value={model.id}>{model.label}{model.quantization ? ` · ${model.quantization}` : ''}</option>)}</select> : <input className="provider-edit" aria-label={`${provider.name} model`} value={provider.model} placeholder="Enter model ID" onChange={(event) => onUpdateProvider(provider.id, 'model', event.target.value)} />}</div>
+          {provider.id === 'lmstudio' && <div className="model-discovery"><button className="model-refresh" type="button" onClick={() => onDiscoverModels(provider.id)}><RefreshCw size={14} /> Refresh installed models</button>{modelStatus[provider.id] && <small className={modelStatus[provider.id].startsWith('Could not') ? 'model-status error' : 'model-status'}>{modelStatus[provider.id]}</small>}</div>}
+          <button className={`use-provider-button ${selected === provider.id ? 'active' : ''}`} onClick={() => onSelect(provider.id)}>{selected === provider.id ? <><Check size={15} /> Used for AI curation</> : 'Use for AI curation'}</button>
+          {provider.id !== 'lmstudio' && <button className={`connect-button ${provider.connected ? 'connected-button' : ''}`} onClick={() => provider.connected ? onCheck(provider.id) : provider.authPending ? onCheck(provider.id) : onConnect(provider.id)}>{provider.connected ? <><Check size={15} /> OAuth connected</> : provider.authPending ? <>Check OAuth session <Settings size={14} /></> : <>Connect with OAuth <ArrowUpRight size={15} /></>}</button>}
+        </div>
+      })}</div>
+      <div className="security-note"><CircleHelp size={17} /><span><strong>LM Studio models are loaded from its local server</strong><br />If your server requires authentication, start Lumen with <code>LM_API_TOKEN</code>. OAuth providers use local CLI sessions; tokens are never returned to the browser or stored in localStorage.</span></div>
+    </div>
+  }
 function LibraryView({ history, onOpen }: { history: SearchSession[]; onOpen: (session: SearchSession) => void }) { return history.length ? <div className="library-view"><div className="settings-heading"><div><span className="section-kicker">Local history</span><h1>Search library</h1><p>Your recent website searches and research threads stay on this device.</p></div><span className="source-count">{history.length} saved</span></div><div className="history-list">{history.map((session) => <button className="history-item" key={session.id} onClick={() => onOpen(session)}><span className="history-date">{new Date(session.createdAt).toLocaleDateString()}</span><strong>{session.query}</strong><small>{session.sources.length} web results</small><ChevronRight size={17} /></button>)}</div></div> : <div className="empty-view"><div className="empty-icon"><FileText size={26} /></div><h1>Your search library</h1><p>Saved website searches and research threads will appear here as you work.</p><button className="primary-button"><Plus size={16} /> New search</button></div> }
 
 export default App
