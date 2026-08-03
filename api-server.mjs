@@ -3,6 +3,7 @@ import { spawn } from 'node:child_process'
 import { readFile } from 'node:fs/promises'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
+import { createHash } from 'node:crypto'
 
 const port = Number(process.env.LUMEN_API_PORT || 3001)
 const host = process.env.LUMEN_API_HOST || '127.0.0.1'
@@ -11,12 +12,102 @@ const cache = new Map()
 const rankedSearchCache = new Map()
 const rankedSearchInflight = new Map()
 const warmSearchJobs = new Map()
+const localRuntimeProfiles = new Map()
+const localStageCache = new Map()
+const localQueue = []
+let localQueueActive = 0
 const rankedSearchWindowPages = 4
 const appRoot = path.dirname(fileURLToPath(import.meta.url))
 const distRoot = path.join(appRoot, 'dist')
 // Local inference varies dramatically with model size, quantization, and
 // hardware. Give it a generous default, while retaining a bounded override.
 const lmStudioTimeoutMs = Math.min(Math.max(Number(process.env.LM_STUDIO_TIMEOUT_MS || 180_000), 30_000), 600_000)
+const localStageCacheTtlMs = 300_000
+
+function clamp(value, min, max, fallback) {
+  const parsed = Number(value)
+  return Number.isFinite(parsed) ? Math.min(Math.max(Math.floor(parsed), min), max) : fallback
+}
+
+function localRuntimeKey(endpoint, model) { return `${safeUrl(endpoint)}::${String(model || '').trim()}` }
+
+function localRuntimeDefaults() {
+  return { autoAdapt: true, warmupEnabled: true, format: 'auto', timeoutMs: lmStudioTimeoutMs, retryCount: 1, concurrency: 1, contextBudget: 6_000, rankingBatchSize: 10 }
+}
+
+function normalizeLocalRuntime(value = {}) {
+  const defaults = localRuntimeDefaults()
+  const format = ['auto', 'json', 'fenced-json', 'markdown'].includes(value.format) ? value.format : defaults.format
+  return {
+    autoAdapt: value.autoAdapt !== false,
+    warmupEnabled: value.warmupEnabled !== false,
+    format,
+    timeoutMs: clamp(value.timeoutMs, 30_000, 600_000, defaults.timeoutMs),
+    retryCount: clamp(value.retryCount, 0, 2, defaults.retryCount),
+    concurrency: clamp(value.concurrency, 1, 2, defaults.concurrency),
+    contextBudget: clamp(value.contextBudget, 1_500, 16_000, defaults.contextBudget),
+    rankingBatchSize: clamp(value.rankingBatchSize, 3, 10, defaults.rankingBatchSize),
+  }
+}
+
+function ensureLocalProfile(endpoint, model, override = {}) {
+  const key = localRuntimeKey(endpoint, model)
+  const existing = localRuntimeProfiles.get(key)
+  const profile = existing || { key, endpoint: safeUrl(endpoint), model: String(model || ''), createdAt: Date.now(), version: 1, warmup: 'not-run', formatDetected: 'unknown', lastResponseMs: null, averageResponseMs: null, lastError: null, stages: {}, overrides: localRuntimeDefaults(), cacheHits: 0 }
+  if (override && Object.keys(override).length) {
+    const nextOverrides = normalizeLocalRuntime({ ...profile.overrides, ...override })
+    if (JSON.stringify(profile.overrides) !== JSON.stringify(nextOverrides)) {
+      profile.overrides = nextOverrides
+      profile.version += existing ? 1 : 0
+    }
+  }
+  localRuntimeProfiles.set(key, profile)
+  return profile
+}
+
+function publicLocalProfile(profile) {
+  return {
+    endpoint: profile.endpoint, model: profile.model, version: profile.version, warmup: profile.warmup,
+    format: profile.formatDetected, lastResponseMs: profile.lastResponseMs, averageResponseMs: profile.averageResponseMs,
+    lastError: profile.lastError, stages: profile.stages, cacheHits: profile.cacheHits,
+    queue: { active: localQueueActive, waiting: localQueue.length }, overrides: profile.overrides,
+  }
+}
+
+function recordLocalStage(profile, stage, status, durationMs = null, error = null, cached = false) {
+  const current = profile.stages[stage] || { success: 0, failure: 0, cached: 0, lastStatus: 'idle', lastDurationMs: null }
+  if (status === 'success') current.success += 1
+  if (status === 'failure') current.failure += 1
+  if (cached) current.cached += 1
+  current.lastStatus = status
+  current.lastDurationMs = durationMs
+  profile.stages[stage] = current
+  if (durationMs != null) {
+    profile.lastResponseMs = durationMs
+    profile.averageResponseMs = profile.averageResponseMs == null ? durationMs : Math.round(profile.averageResponseMs * 0.7 + durationMs * 0.3)
+  }
+  profile.lastError = error || null
+  localRuntimeProfiles.set(profile.key, profile)
+}
+
+function enqueueLocal(task, concurrency = 1) {
+  return new Promise((resolve, reject) => {
+    localQueue.push({ task, concurrency, resolve, reject })
+    const drain = () => {
+      const limit = Math.max(1, ...localQueue.map((item) => item.concurrency))
+      while (localQueueActive < limit && localQueue.length) {
+        const next = localQueue.shift()
+        localQueueActive += 1
+        Promise.resolve().then(next.task).then(next.resolve, next.reject).finally(() => { localQueueActive -= 1; drain() })
+      }
+    }
+    drain()
+  })
+}
+
+function stageCacheKey(profile, stage, prompt, options = {}) {
+  return createHash('sha256').update(`${profile.key}:${profile.version}:${stage}:${options.maxTokens || ''}:${prompt}`).digest('hex')
+}
 
 const providerCommands = {
   openai: process.env.OPENAI_CODEX_COMMAND || 'codex',
@@ -147,7 +238,10 @@ async function searchSearxng(query, depth = 'quick', maxResults = 10, configured
 async function searchRankedWindow(query, maxResults = 10, configuredUrl = searxngUrl, category = 'general', requestedPage = 1, provider = 'lmstudio', override = {}, curate = true, includeOverview = true) {
   const page = Math.max(1, Math.floor(Number(requestedPage) || 1))
   const pageSize = Math.min(Math.max(1, Number(maxResults) || 10), 10)
-  const cacheKey = JSON.stringify({ query, pageSize, configuredUrl, category, provider, endpoint: override.endpoint || '', model: override.model || '', curate })
+  const stageOutcomes = []
+  const effectiveOverride = { ...override, stageOutcomes }
+  const localProfile = provider === 'lmstudio' ? ensureLocalProfile(override.endpoint || modelRuntimes.lmstudio.endpoint, override.model || modelRuntimes.lmstudio.model, override.localRuntime || {}) : null
+  const cacheKey = JSON.stringify({ query, pageSize, configuredUrl, category, provider, endpoint: override.endpoint || '', model: override.model || '', profileVersion: localProfile?.version || 0, curate })
   const hit = rankedSearchCache.get(cacheKey)
   let ranked
 
@@ -166,7 +260,7 @@ async function searchRankedWindow(query, maxResults = 10, configuredUrl = searxn
         })
         let curation
         try {
-          curation = curate ? await curateResults(provider, query, candidates, override, null, includeOverview) : { results: candidates, mode: 'disabled', error: null, overview: '', plan: null }
+          curation = curate ? await curateResults(provider, query, candidates, effectiveOverride, null, includeOverview) : { results: candidates, mode: 'disabled', error: null, overview: '', plan: null }
         } catch (error) {
           curation = { results: heuristicRank(query, candidates), mode: 'heuristic', error: error.message, overview: '', plan: null }
         }
@@ -180,10 +274,12 @@ async function searchRankedWindow(query, maxResults = 10, configuredUrl = searxn
           errors: pages.flatMap((result) => result.errors),
           queries: [query],
           budget: { requested: rankedSearchWindowPages, used: rankedSearchWindowPages },
-          curation: { mode: curation.mode, error: curation.error },
+          curation: { mode: curation.mode, error: curation.error, warning: curation.warning || null },
           plan: { mode: plan.mode, focus: plan.focus, criteria: plan.criteria, error: plan.error },
           answer,
           overviewError,
+          runtime: localProfile ? publicLocalProfile(localProfile) : null,
+          stages: stageOutcomes,
         }
         if (value.results.length) rankedSearchCache.set(cacheKey, { createdAt: Date.now(), value })
         return value
@@ -323,18 +419,58 @@ async function chatCompletion(provider, system, prompt, override = {}, options =
   runtime.key ||= modelRuntimes[provider]?.key || modelRuntimes.lmstudio.key
   const endpoint = chatCompletionsUrl(runtime.endpoint)
   const requestedTimeout = options.timeoutMs || 30_000
-  const timeoutMs = provider === 'lmstudio' ? Math.max(requestedTimeout, lmStudioTimeoutMs) : requestedTimeout
-  const response = await fetch(endpoint, {
-    method: 'POST', signal: AbortSignal.timeout(timeoutMs), headers: { 'content-type': 'application/json', ...(runtime.key ? { authorization: `Bearer ${runtime.key}` } : {}) },
-    body: JSON.stringify({ model: runtime.model, temperature: 0.1, max_tokens: options.maxTokens || 700, messages: [{ role: 'system', content: system }, { role: 'user', content: prompt }] }),
-  })
-  if (!response.ok) {
-    const payload = await response.json().catch(() => ({}))
-    const message = payload?.error?.message || payload?.message || `${response.status} ${response.statusText}`
-    throw new Error(`${provider} model request failed: ${message}`)
+  if (provider !== 'lmstudio') {
+    const response = await fetch(endpoint, { method: 'POST', signal: AbortSignal.timeout(requestedTimeout), headers: { 'content-type': 'application/json', ...(runtime.key ? { authorization: `Bearer ${runtime.key}` } : {}) }, body: JSON.stringify({ model: runtime.model, temperature: 0.1, max_tokens: options.maxTokens || 700, messages: [{ role: 'system', content: system }, { role: 'user', content: prompt }] }) })
+    if (!response.ok) { const payload = await response.json().catch(() => ({})); throw new Error(`${provider} model request failed: ${payload?.error?.message || payload?.message || `${response.status} ${response.statusText}`}`) }
+    const payload = await response.json()
+    return payload.choices?.[0]?.message?.content || ''
   }
-  const payload = await response.json()
-  return payload.choices?.[0]?.message?.content || ''
+
+  const profile = ensureLocalProfile(runtime.endpoint, runtime.model, override.localRuntime || {})
+  const stage = options.stage || 'completion'
+  const cacheKey = options.cacheable ? stageCacheKey(profile, stage, prompt, options) : ''
+  const cached = cacheKey && localStageCache.get(cacheKey)
+  if (cached && Date.now() - cached.createdAt < localStageCacheTtlMs) {
+    profile.cacheHits += 1
+    recordLocalStage(profile, stage, 'success', 0, null, true)
+    options.stageOutcomes?.push({ stage, status: 'cached', durationMs: 0, attempts: 0, cached: true })
+    return cached.output
+  }
+  if (cached) localStageCache.delete(cacheKey)
+
+  const maxAttempts = 1 + profile.overrides.retryCount
+  const selectedFormat = profile.overrides.format === 'auto' ? profile.formatDetected : profile.overrides.format
+  const formatInstruction = selectedFormat === 'json' ? ' Respond with valid JSON only; do not wrap it in prose or Markdown.' : selectedFormat === 'fenced-json' ? ' Put the requested JSON in one ```json fenced block only.' : selectedFormat === 'markdown' ? ' Use concise Markdown when JSON is not possible; do not explain formatting.' : ''
+  let lastError
+  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    const startedAt = Date.now()
+    const maxTokens = Math.max(80, Math.min(options.maxTokens || 700, attempt === 1 ? profile.overrides.contextBudget : Math.floor(profile.overrides.contextBudget * 0.65), attempt === 1 ? options.maxTokens || 700 : Math.floor((options.maxTokens || 700) * 0.65)))
+    const attemptPrompt = attempt === 1 ? prompt : `${prompt.slice(0, Math.max(1_200, Math.floor(profile.overrides.contextBudget * 0.65)))}\n\nReturn the smallest valid answer only.`
+    try {
+      const payload = await enqueueLocal(async () => {
+        const response = await fetch(endpoint, { method: 'POST', signal: AbortSignal.timeout(Math.max(requestedTimeout, profile.overrides.timeoutMs)), headers: { 'content-type': 'application/json', ...(runtime.key ? { authorization: `Bearer ${runtime.key}` } : {}) }, body: JSON.stringify({ model: runtime.model, temperature: 0.1, max_tokens: maxTokens, messages: [{ role: 'system', content: `${system}${formatInstruction}` }, { role: 'user', content: attemptPrompt }] }) })
+        if (!response.ok) { const value = await response.json().catch(() => ({})); const message = value?.error?.message || value?.message || `${response.status} ${response.statusText}`; const error = new Error(`lmstudio model request failed: ${message}`); error.retryable = response.status === 408 || response.status === 429 || response.status >= 500; throw error }
+        return response.json()
+      }, profile.overrides.concurrency)
+      const output = payload.choices?.[0]?.message?.content || ''
+      if (!output.trim()) throw new Error('lmstudio model returned an empty response')
+      const durationMs = Date.now() - startedAt
+      recordLocalStage(profile, stage, 'success', durationMs)
+      options.stageOutcomes?.push({ stage, status: 'success', durationMs, attempts: attempt, cached: false })
+      if (cacheKey) localStageCache.set(cacheKey, { createdAt: Date.now(), profileKey: profile.key, output })
+      return output
+    } catch (error) {
+      lastError = error
+      const durationMs = Date.now() - startedAt
+      const retryable = error?.retryable || error?.name === 'TimeoutError' || error?.name === 'AbortError' || /timeout|overload|busy|empty response/i.test(error?.message || '')
+      if (attempt === maxAttempts || !retryable) {
+        recordLocalStage(profile, stage, 'failure', durationMs, error.message)
+        options.stageOutcomes?.push({ stage, status: 'failed', durationMs, attempts: attempt, cached: false, reason: error.message })
+        throw error
+      }
+    }
+  }
+  throw lastError || new Error('lmstudio model request failed')
 }
 
 function parseJsonObject(output, label) {
@@ -346,7 +482,7 @@ function parseJsonObject(output, label) {
 async function planSearch(provider, query, category, depth, override = {}) {
   const prompt = `User query: ${query}\nCategory: ${category}\nDepth: ${depth}\n\nReturn ONLY JSON: {"searchQuery":"a precise website search query", "focus":"what evidence matters", "criteria":["criterion"]}. Keep searchQuery close to the user's wording; do not add facts or change the requested place, date, product, or person.`
   try {
-    const plan = parseJsonObject(await chatCompletion(provider, 'You are Lumen\'s search planner. Convert the user intent into a precise web-search plan without answering the question.', prompt, override, { timeoutMs: 8_000, maxTokens: 120 }), 'a search plan')
+    const plan = parseJsonObject(await chatCompletion(provider, 'You are Lumen\'s search planner. Convert the user intent into a precise web-search plan without answering the question.', prompt, override, { timeoutMs: 8_000, maxTokens: 120, stage: 'plan', cacheable: true, stageOutcomes: override.stageOutcomes }), 'a search plan')
     const searchQuery = String(plan.searchQuery || '').trim().slice(0, 500)
     return { searchQuery: searchQuery || query, focus: String(plan.focus || '').slice(0, 280), criteria: Array.isArray(plan.criteria) ? plan.criteria.slice(0, 5).map((item) => String(item).slice(0, 120)) : [], mode: 'ai', error: null }
   } catch (error) {
@@ -354,9 +490,33 @@ async function planSearch(provider, query, category, depth, override = {}) {
   }
 }
 
+async function probeLocalRuntime(override = {}) {
+  const runtime = { ...modelRuntimes.lmstudio, endpoint: override.endpoint || modelRuntimes.lmstudio.endpoint, model: override.model || modelRuntimes.lmstudio.model }
+  const profile = ensureLocalProfile(runtime.endpoint, runtime.model, override.localRuntime || {})
+  if (!profile.overrides.warmupEnabled) return { profile: publicLocalProfile(profile), skipped: true }
+  profile.warmup = 'running'
+  localRuntimeProfiles.set(profile.key, profile)
+  try {
+    const output = await chatCompletion('lmstudio', 'You are a capability probe. Reply with the requested compact response only.', 'Return exactly this JSON object: {"ready":true,"format":"json"}', { ...override, endpoint: runtime.endpoint, model: runtime.model }, { timeoutMs: 12_000, maxTokens: 40, stage: 'warmup', stageOutcomes: [] })
+    const cleaned = output.replace(/```json|```/gi, '').trim()
+    if (/^\{/.test(cleaned) && /"ready"\s*:\s*true/i.test(cleaned)) profile.formatDetected = cleaned.startsWith('{') ? 'json' : 'fenced-json'
+    else if (cleaned) profile.formatDetected = 'markdown'
+    else profile.formatDetected = 'unknown'
+    profile.warmup = 'ready'
+    profile.lastError = null
+    localRuntimeProfiles.set(profile.key, profile)
+    return { profile: publicLocalProfile(profile), outputFormat: profile.formatDetected }
+  } catch (error) {
+    profile.warmup = 'failed'
+    profile.lastError = error.message
+    localRuntimeProfiles.set(profile.key, profile)
+    return { profile: publicLocalProfile(profile), outputFormat: 'unknown', error: error.message }
+  }
+}
+
 async function crossCheckEvidence(provider, query, results, override = {}) {
   const context = results.slice(0, 8).map((item, index) => `[${index + 1}] ${item.pageTitle || item.title}\n${item.url}\n${(item.pageText || item.content).slice(0, 1_200)}`).join('\n\n')
-  return chatCompletion(provider, 'You are Lumen\'s evidence checker. Identify only supported findings, disagreement, uncertainty, or weak evidence before a final answer.', `Question: ${query}\n\nReturn concise Markdown bullets. Cite every observation as [source number]. Do not answer beyond the supplied evidence.\n\nSources:\n${context}`, override, { timeoutMs: 24_000, maxTokens: 400 })
+  return chatCompletion(provider, 'You are Lumen\'s evidence checker. Identify only supported findings, disagreement, uncertainty, or weak evidence before a final answer.', `Question: ${query}\n\nReturn concise Markdown bullets. Cite every observation as [source number]. Do not answer beyond the supplied evidence.\n\nSources:\n${context}`, override, { timeoutMs: 24_000, maxTokens: 400, stage: 'evidence-check', cacheable: true, stageOutcomes: override.stageOutcomes })
 }
 
 async function synthesize(provider, query, results, override = {}, evidenceReview = '', options = {}) {
@@ -458,12 +618,13 @@ function parseRankingEntries(output) {
 async function rankEveryResultWithAI(provider, query, results, override = {}) {
   const entries = []
   const failures = []
-  const batchSize = 10
+  const runtimeProfile = provider === 'lmstudio' ? ensureLocalProfile(override.endpoint || modelRuntimes.lmstudio.endpoint, override.model || modelRuntimes.lmstudio.model, override.localRuntime || {}) : null
+  const batchSize = runtimeProfile?.overrides.rankingBatchSize || 10
   for (let offset = 0; offset < results.length; offset += batchSize) {
     const batch = results.slice(offset, offset + batchSize)
     const candidates = batch.map((item, index) => `${offset + index + 1}. ${item.title.slice(0, 110)} | ${new URL(item.url).hostname} | ${item.content.replace(/\s+/g, ' ').slice(0, 85)}`).join('\n')
     try {
-      const output = await chatCompletion(provider, 'You are Lumen\'s search reranker. Score each supplied website for the exact user query. Return only the requested JSON.', `Query: ${query}\n\nReturn ONLY JSON array with every id exactly once: [{"id":number,"score":0-100,"reason":"max 8 words"}].\n\nCandidates:\n${candidates}`, override, { timeoutMs: 16_000, maxTokens: 240 })
+      const output = await chatCompletion(provider, 'You are Lumen\'s search reranker. Score each supplied website for the exact user query. Return only the requested JSON.', `Query: ${query}\n\nReturn ONLY JSON array with every id exactly once: [{"id":number,"score":0-100,"reason":"max 8 words"}].\n\nCandidates:\n${candidates}`, override, { timeoutMs: 16_000, maxTokens: 240, stage: 'rank', cacheable: true, stageOutcomes: override.stageOutcomes })
       const rankedBatch = parseRankingEntries(output)
       const validBatchIds = new Set(rankedBatch.map((item) => Number(item.id)))
       if (validBatchIds.size !== batch.length || [...validBatchIds].some((id) => id < offset + 1 || id > offset + batch.length)) throw new Error(`AI returned an incomplete ranking batch (${validBatchIds.size}/${batch.length})`)
@@ -489,7 +650,7 @@ async function curateResults(provider, query, results, override = {}, plan = nul
     let overviewError = null
     let modelResponded = false
     try {
-      const output = await chatCompletion(provider, 'You are Lumen\'s compact search intelligence engine. Prioritize a useful, cited overview and select only the strongest sources.', prompt, override, { timeoutMs: 35_000, maxTokens: 560 })
+      const output = await chatCompletion(provider, 'You are Lumen\'s compact search intelligence engine. Prioritize a useful, cited overview and select only the strongest sources.', prompt, override, { timeoutMs: 35_000, maxTokens: 560, stage: 'overview', cacheable: true, stageOutcomes: override.stageOutcomes })
       modelResponded = Boolean(output.trim())
       try {
         const intelligence = parseSearchIntelligence(output, query, results)
@@ -513,7 +674,7 @@ async function curateResults(provider, query, results, override = {}, plan = nul
       const output = await curateViaCli(provider, prompt)
       return { results: parseCuratedRanking(output, query, results), mode: 'ai', error: null, overview: '', plan: null }
     }
-    const output = await chatCompletion(provider, 'You are a fast, precise web search ranking model. Rank supplied candidates only.', prompt, override, { timeoutMs: 22_000, maxTokens: Math.min(700, 80 + results.length * 14) })
+    const output = await chatCompletion(provider, 'You are a fast, precise web search ranking model. Rank supplied candidates only.', prompt, override, { timeoutMs: 22_000, maxTokens: Math.min(700, 80 + results.length * 14), stage: 'rank', cacheable: true, stageOutcomes: override.stageOutcomes })
     return { results: parseCuratedRanking(output, query, results), mode: 'ai', error: null, overview: '', plan: null }
   } catch (error) {
     return { results: heuristicRank(query, results), mode: 'heuristic', error: error.message, overview: '', plan: null }
@@ -523,7 +684,7 @@ async function curateResults(provider, query, results, override = {}, plan = nul
 async function generateSearchOverview(provider, query, results, override = {}) {
   const strongestSources = results.slice(0, 6)
   if (provider !== 'lmstudio' && (await commandStatus(provider)).authenticated) return synthesizeViaCli(provider, query, strongestSources)
-  return synthesize(provider, query, strongestSources, override, '', { timeoutMs: 28_000, maxTokens: 650 })
+  return synthesize(provider, query, strongestSources, override, '', { timeoutMs: 28_000, maxTokens: 650, stage: 'overview', cacheable: true, stageOutcomes: override.stageOutcomes })
 }
 
 async function synthesizeViaCli(provider, query, results) {
@@ -604,13 +765,35 @@ async function handle(req, res) {
       return json(res, 200, { provider, ...(await discoverModels(provider, body.endpoint || url.searchParams.get('endpoint') || undefined, typeof body.key === 'string' ? body.key : '')) })
     } catch (error) { return json(res, 200, { provider, models: [], error: error.message }) }
   }
+  if (url.pathname === '/api/local-runtime/profile') {
+    const body = req.method === 'GET' ? {} : await readBody(req)
+    const endpoint = body.endpoint || url.searchParams.get('endpoint') || modelRuntimes.lmstudio.endpoint
+    const model = body.model || url.searchParams.get('model') || modelRuntimes.lmstudio.model
+    const key = localRuntimeKey(endpoint, model)
+    if (req.method === 'DELETE') {
+      localRuntimeProfiles.delete(key)
+      for (const [cacheKey, cacheValue] of localStageCache) if (cacheValue.profileKey === key) localStageCache.delete(cacheKey)
+      return json(res, 200, { cleared: true })
+    }
+    if (req.method === 'PUT') {
+      const profile = ensureLocalProfile(endpoint, model, body.overrides || body.localRuntime || {})
+      return json(res, 200, { profile: publicLocalProfile(profile) })
+    }
+    if (req.method === 'GET') return json(res, 200, { profile: publicLocalProfile(ensureLocalProfile(endpoint, model)) })
+  }
+  if (req.method === 'POST' && url.pathname === '/api/local-runtime/probe') {
+    const body = await readBody(req)
+    const result = await probeLocalRuntime(body.providerConfig || body)
+    return json(res, result.error ? 400 : 200, result)
+  }
   if (req.method === 'POST' && url.pathname === '/api/providers/test') {
     const body = await readBody(req)
     const provider = modelRuntimes[body.provider] ? body.provider : 'lmstudio'
     try {
-      const reply = await chatCompletion(provider, 'You are a connection test. Reply with exactly: Lumen model connection confirmed.', 'Confirm this model connection.', body.providerConfig || {})
+      const reply = await chatCompletion(provider, 'You are a connection test. Reply with exactly: Lumen model connection confirmed.', 'Confirm this model connection.', body.providerConfig || {}, { stage: 'connection-test', stageOutcomes: [] })
       if (!reply.trim()) throw new Error('The model returned an empty response')
-      return json(res, 200, { ok: true, provider, model: body.providerConfig?.model || modelRuntimes[provider].model, reply: reply.slice(0, 300) })
+      const probe = provider === 'lmstudio' ? await probeLocalRuntime(body.providerConfig || {}) : null
+      return json(res, 200, { ok: true, provider, model: body.providerConfig?.model || modelRuntimes[provider].model, reply: reply.slice(0, 300), runtime: probe?.profile || null, probeError: probe?.error || null })
     } catch (error) { return json(res, 400, { ok: false, provider, error: error.message }) }
   }
   if (req.method === 'GET' && url.pathname === '/api/agents') {
@@ -658,11 +841,13 @@ async function handle(req, res) {
     if (!body.query || typeof body.query !== 'string') return json(res, 400, { error: 'query is required' })
     const selectedProvider = modelRuntimes[body.provider] ? body.provider : 'lmstudio'
     const originalQuery = body.query.trim().slice(0, 500)
+    const stageOutcomes = []
+    const providerConfig = { ...(body.providerConfig || {}), stageOutcomes }
     const [plan, search] = await Promise.all([
-      planSearch(selectedProvider, originalQuery, body.category || 'general', body.depth === 'quick' ? 'quick' : 'deep', body.providerConfig || {}),
+      planSearch(selectedProvider, originalQuery, body.category || 'general', body.depth === 'quick' ? 'quick' : 'deep', providerConfig),
       searchSearxng(originalQuery, body.depth === 'quick' ? 'quick' : 'deep', Math.min(Number(body.maxResults) || 10, 10), body.baseUrl || searxngUrl, body.category || 'general', body.page),
     ])
-    const curation = await curateResults(selectedProvider, body.query, search.results, body.providerConfig || {}, plan)
+    const curation = await curateResults(selectedProvider, body.query, search.results, providerConfig, plan)
     const curatedSearch = { ...search, results: curation.results, curation: { mode: curation.mode, error: curation.error } }
     const pagePass = body.depth === 'quick' || !curatedSearch.results.length ? { results: curatedSearch.results, errors: [] } : await readTopSourcePages(curatedSearch.results, curatedSearch.results.length)
     const researchSearch = { ...curatedSearch, results: pagePass.results, errors: [...search.errors, ...pagePass.errors], pageReads: pagePass.results.filter((item) => item.pageText).length }
@@ -671,7 +856,7 @@ async function handle(req, res) {
     let synthesisMode = 'api'
     const synthesisErrors = []
     if (researchSearch.results.length) {
-      try { evidenceReview = await crossCheckEvidence(selectedProvider, body.query, researchSearch.results, body.providerConfig || {}) }
+      try { evidenceReview = await crossCheckEvidence(selectedProvider, body.query, researchSearch.results, providerConfig) }
       catch (error) { synthesisErrors.push({ provider: `${selectedProvider}:evidence-check`, message: error.message }) }
       if (selectedProvider !== 'lmstudio' && (await commandStatus(selectedProvider)).authenticated) {
         try {
@@ -680,7 +865,7 @@ async function handle(req, res) {
         } catch (error) { synthesisErrors.push({ provider: `${selectedProvider}:oauth-cli`, message: error.message }) }
       }
       if (!answer) {
-        try { answer = await synthesize(selectedProvider, body.query, researchSearch.results, body.providerConfig || {}, evidenceReview) }
+        try { answer = await synthesize(selectedProvider, body.query, researchSearch.results, providerConfig, evidenceReview, { stage: 'synthesis', cacheable: true, stageOutcomes }) }
         catch (error) { synthesisErrors.push({ provider: selectedProvider, message: error.message }) }
       }
     }
@@ -692,7 +877,8 @@ async function handle(req, res) {
       { step: 'Cross-check', status: evidenceReview ? 'complete' : 'skipped', detail: evidenceReview ? `AI checked ${researchSearch.results.length} sources for support and disagreement before synthesis.` : 'Model evidence check unavailable; synthesis is limited to retrieved sources.' },
       { step: 'Synthesize', status: answer ? 'complete' : 'error', detail: answer ? `Synthesized with ${selectedProvider}${synthesisMode === 'oauth-cli' ? ' OAuth session' : ''}.` : 'No model synthesis was produced.' },
     ]
-    return json(res, 200, { query: body.query, provider: selectedProvider, synthesisMode, plan, evidenceReview, search: { ...researchSearch, errors: [...researchSearch.errors, ...synthesisErrors] }, trace, answer: answer || (researchSearch.results.length ? `Research retrieved ${researchSearch.results.length} sources, but ${selectedProvider} could not synthesize them. Check the provider endpoint, model, or server-side credentials.` : 'SearXNG did not return sources. Check the SearXNG URL and JSON format configuration, then try again.') })
+    const runtime = selectedProvider === 'lmstudio' ? publicLocalProfile(ensureLocalProfile(providerConfig.endpoint || modelRuntimes.lmstudio.endpoint, providerConfig.model || modelRuntimes.lmstudio.model, providerConfig.localRuntime || {})) : null
+    return json(res, 200, { query: body.query, provider: selectedProvider, synthesisMode, plan, evidenceReview, search: { ...researchSearch, errors: [...researchSearch.errors, ...synthesisErrors], curation: { mode: curation.mode, error: curation.error, warning: curation.warning || null } }, trace, stages: stageOutcomes, runtime, answer: answer || (researchSearch.results.length ? `Research retrieved ${researchSearch.results.length} sources, but ${selectedProvider} could not synthesize them. Check the provider endpoint, model, or server-side credentials.` : 'SearXNG did not return sources. Check the SearXNG URL and JSON format configuration, then try again.') })
   }
   return json(res, 404, { error: 'Not found' })
 }

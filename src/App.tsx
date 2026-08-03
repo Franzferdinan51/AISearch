@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import Activity from 'lucide-react/dist/esm/icons/activity.mjs'
 import ArrowUpRight from 'lucide-react/dist/esm/icons/arrow-up-right.mjs'
 import Check from 'lucide-react/dist/esm/icons/check.mjs'
@@ -27,7 +27,9 @@ import X from 'lucide-react/dist/esm/icons/x.mjs'
 
 type Mode = 'Web search' | 'Quick answer' | 'Deep research' | 'Explore'
 type SearchCategory = 'general' | 'news' | 'images' | 'videos' | 'github' | 'science'
-type Provider = { id: string; name: string; model: string; endpoint: string; kind: string; connected: boolean; authPending?: boolean; color: string; apiKey?: string }
+type LocalRuntimeOverrides = { autoAdapt?: boolean; warmupEnabled?: boolean; format?: 'auto' | 'json' | 'fenced-json' | 'markdown'; timeoutMs?: number; retryCount?: number; concurrency?: number; contextBudget?: number; rankingBatchSize?: number }
+type LocalRuntimeProfile = { warmup?: string; format?: string; lastResponseMs?: number | null; averageResponseMs?: number | null; lastError?: string | null; queue?: { active: number; waiting: number }; overrides?: LocalRuntimeOverrides; stages?: Record<string, { success?: number; failure?: number; cached?: number; lastStatus?: string; lastDurationMs?: number | null }> }
+type Provider = { id: string; name: string; model: string; endpoint: string; kind: string; connected: boolean; authPending?: boolean; color: string; apiKey?: string; localRuntime?: LocalRuntimeOverrides }
 type ModelOption = { id: string; label: string; architecture?: string | null; quantization?: string | null }
 type Preferences = { defaultMode: Mode; warmTabs: boolean; showOverview: boolean; resultDensity: 'comfortable' | 'compact' }
 
@@ -95,6 +97,8 @@ function App() {
   const [searchStatus, setSearchStatus] = useState('')
   const [availableModels, setAvailableModels] = useState<Record<string, ModelOption[]>>({})
   const [modelStatus, setModelStatus] = useState<Record<string, string>>({})
+  const [localRuntime, setLocalRuntime] = useState<LocalRuntimeProfile | null>(null)
+  const [runtimeStages, setRuntimeStages] = useState<Array<{ stage: string; status: string; durationMs?: number; attempts?: number; cached?: boolean; reason?: string }>>([])
   const [query, setQuery] = useState('')
   const [input, setInput] = useState('')
   const [running, setRunning] = useState(false)
@@ -112,10 +116,12 @@ function App() {
   const [showProvider, setShowProvider] = useState(false)
   const [mobileNav, setMobileNav] = useState(false)
   const [selectedImage, setSelectedImage] = useState<SearchSource | null>(null)
+  const activeRequest = useRef<AbortController | null>(null)
 
   const provider = providers.find((item) => item.id === selectedProvider) ?? providers[0]
   const activeModelOptions = availableModels[provider.id]?.length ? availableModels[provider.id] : providerModelSuggestions[provider.id] || []
   const activeModelMissing = !activeModelOptions.some((item) => item.id === provider.model)
+  const providerConfig = { endpoint: provider.endpoint, model: provider.model, key: provider.apiKey, localRuntime: provider.localRuntime }
   const isEmptySearch = view === 'search' && !query && !running && sourceList.length === 0
   const isEmptyResearch = view === 'research' && !query && !running && sourceList.length === 0
 
@@ -158,19 +164,57 @@ function App() {
     } catch (error) { setModelStatus((current) => ({ ...current, [id]: error instanceof Error ? error.message : 'Could not load models' })) }
   }
 
+  const refreshLocalRuntime = async () => {
+    if (provider.id !== 'lmstudio') return
+    try {
+      const response = await fetch(`/api/local-runtime/profile?endpoint=${encodeURIComponent(provider.endpoint)}&model=${encodeURIComponent(provider.model)}`)
+      const payload = await response.json()
+      if (response.ok) setLocalRuntime(payload.profile || null)
+    } catch { setLocalRuntime(null) }
+  }
+
+  const updateLocalRuntime = async (patch: LocalRuntimeOverrides) => {
+    const next = { ...(provider.localRuntime || {}), ...patch }
+    setProviders((current) => current.map((item) => item.id === 'lmstudio' ? { ...item, localRuntime: next } : item))
+    try {
+      const response = await fetch('/api/local-runtime/profile', { method: 'PUT', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ endpoint: provider.endpoint, model: provider.model, overrides: next }) })
+      const payload = await response.json()
+      if (response.ok) setLocalRuntime(payload.profile || null)
+    } catch {}
+  }
+
+  const probeLocalRuntime = async () => {
+    setModelStatus((current) => ({ ...current, lmstudio: 'Warming and profiling local model…' }))
+    try {
+      const response = await fetch('/api/local-runtime/probe', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ providerConfig }) })
+      const payload = await response.json()
+      if (!response.ok) throw new Error(payload.error || 'Warm-up failed')
+      setLocalRuntime(payload.profile || null)
+      setModelStatus((current) => ({ ...current, lmstudio: `Warm · ${payload.outputFormat || 'adaptive'} format ready` }))
+    } catch (error) { setModelStatus((current) => ({ ...current, lmstudio: error instanceof Error ? error.message : 'Warm-up failed' })) }
+  }
+
+  const clearLocalRuntime = async () => {
+    try { await fetch('/api/local-runtime/profile', { method: 'DELETE', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ endpoint: provider.endpoint, model: provider.model }) }) } catch {}
+    setLocalRuntime(null)
+    setModelStatus((current) => ({ ...current, lmstudio: 'Local profile cleared' }))
+  }
+
   const testProviderModel = async (id: string) => {
     const target = providers.find((item) => item.id === id)
     if (!target) return
     setModelStatus((current) => ({ ...current, [id]: 'Testing model connection…' }))
     try {
-      const response = await fetch('/api/providers/test', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ provider: id, providerConfig: { endpoint: target.endpoint, model: target.model, key: target.apiKey } }) })
+      const response = await fetch('/api/providers/test', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ provider: id, providerConfig: { endpoint: target.endpoint, model: target.model, key: target.apiKey, localRuntime: target.localRuntime } }) })
       const payload = await response.json()
       if (!response.ok || !payload.ok) throw new Error(payload.error || 'Model connection failed')
-      setModelStatus((current) => ({ ...current, [id]: `Connected · ${payload.model} answered` }))
+      if (id === 'lmstudio') setLocalRuntime(payload.runtime || null)
+      setModelStatus((current) => ({ ...current, [id]: payload.probeError ? `Connected · warm-up needs retry` : `Connected · ${payload.model} answered` }))
     } catch (error) { setModelStatus((current) => ({ ...current, [id]: error instanceof Error ? error.message : 'Model connection failed' })) }
   }
 
   useEffect(() => { discoverProviderModels('lmstudio') }, [])
+  useEffect(() => { void refreshLocalRuntime() }, [provider.id, provider.endpoint, provider.model])
 
   useEffect(() => {
     const modelContext = (document as Document & { modelContext?: WebMCPContext }).modelContext
@@ -191,11 +235,14 @@ function App() {
   }, [searchEndpoint])
 
   const warmSearchTabs = (nextQuery: string) => {
-    void fetch('/api/search/warm', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ query: nextQuery, baseUrl: searchEndpoint, maxResults: 10, provider: selectedProvider, providerConfig: { endpoint: provider.endpoint, model: provider.model, key: provider.apiKey } }) }).catch(() => {})
+    void fetch('/api/search/warm', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ query: nextQuery, baseUrl: searchEndpoint, maxResults: 10, provider: selectedProvider, providerConfig }) }).catch(() => {})
   }
 
   const runResearch = async (nextQuery = query, nextCategory = searchCategory, execution: { mode?: Mode; view?: 'search' | 'research' } = {}) => {
     if (!nextQuery.trim()) return
+    activeRequest.current?.abort()
+    const request = new AbortController()
+    activeRequest.current = request
     const activeMode = execution.mode || mode
     const activeView = execution.view || view
     setQuery(nextQuery)
@@ -210,13 +257,15 @@ function App() {
     try {
       const isDeep = activeMode === 'Deep research' || activeMode === 'Explore' || activeView === 'research'
       const endpoint = activeView === 'research' ? '/api/research' : '/api/search'
-      const response = await fetch(endpoint, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ query: nextQuery, provider: selectedProvider, providerConfig: { endpoint: provider.endpoint, model: provider.model, key: provider.apiKey }, baseUrl: searchEndpoint, category: nextCategory, depth: isDeep ? 'deep' : 'quick', maxResults: activeMode === 'Quick answer' ? 5 : 10, page: 1, includeOverview: preferences.showOverview && nextCategory === 'general' }) })
+      const response = await fetch(endpoint, { method: 'POST', signal: request.signal, headers: { 'content-type': 'application/json' }, body: JSON.stringify({ query: nextQuery, provider: selectedProvider, providerConfig, baseUrl: searchEndpoint, category: nextCategory, depth: isDeep ? 'deep' : 'quick', maxResults: activeMode === 'Quick answer' ? 5 : 10, page: 1, includeOverview: preferences.showOverview && nextCategory === 'general' }) })
       const payload = await response.json()
       if (!response.ok) throw new Error(payload.error || 'Research request failed')
       const normalized = normalizeSources(payload.search?.results || payload.results || [], 1)
       setSourceList(normalized)
       setHasMoreResults(Boolean(payload.search?.hasMore ?? payload.hasMore))
       setCurationMode(payload.search?.curation?.mode || payload.curation?.mode || 'none')
+      setLocalRuntime(payload.runtime || payload.search?.runtime || null)
+      setRuntimeStages(payload.stages || payload.search?.stages || [])
       const curationError = payload.search?.curation?.error || payload.curation?.error
       if (curationError && selectedProvider === 'lmstudio') setApiError(`LM Studio was not used for this search: ${curationError}`)
       setAnswer(payload.answer || (nextCategory === 'news' ? `Latest news results for “${nextQuery}”.` : nextCategory === 'images' ? `Image results for “${nextQuery}”.` : nextCategory === 'videos' ? `Video results for “${nextQuery}”.` : nextCategory === 'github' ? `GitHub repositories for “${nextQuery}”.` : nextCategory === 'science' ? `Academic and technical results for “${nextQuery}”.` : `Found ${normalized.length} ${payload.curation?.mode === 'ai' ? 'AI-curated' : 'relevance-ranked'} web results for “${nextQuery}”. Review the overview and sources below, or switch to Deep research for a cited synthesis.`))
@@ -224,29 +273,34 @@ function App() {
       if (normalized.length) setHistory((current) => [{ id: crypto.randomUUID(), query: nextQuery, createdAt: new Date().toISOString(), sources: normalized, answer: payload.answer || '' }, ...current.filter((item) => item.query !== nextQuery)].slice(0, 20))
       setStep(5)
     } catch (error) {
-      setApiError(error instanceof Error ? error.message : 'Research API unavailable. Start `npm run dev:api`.')
+      if (!(error instanceof DOMException && error.name === 'AbortError')) setApiError(error instanceof Error ? error.message : 'Research API unavailable. Start `npm run dev:api`.')
     } finally {
       window.clearInterval(timer)
-      setRunning(false)
+      if (activeRequest.current === request) { activeRequest.current = null; setRunning(false) }
     }
   }
 
   const loadResultsPage = async (page: number) => {
     if (page < 1 || running || (page > resultsPage && !hasMoreResults)) return
+    activeRequest.current?.abort()
+    const request = new AbortController()
+    activeRequest.current = request
     setRunning(true)
     setApiError('')
     try {
-      const response = await fetch('/api/search', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ query, baseUrl: searchEndpoint, category: searchCategory, depth: 'quick', maxResults: 10, page, provider: selectedProvider, providerConfig: { endpoint: provider.endpoint, model: provider.model, key: provider.apiKey }, curate: true, includeOverview: false }) })
+      const response = await fetch('/api/search', { method: 'POST', signal: request.signal, headers: { 'content-type': 'application/json' }, body: JSON.stringify({ query, baseUrl: searchEndpoint, category: searchCategory, depth: 'quick', maxResults: 10, page, provider: selectedProvider, providerConfig, curate: true, includeOverview: false }) })
       const payload = await response.json()
       if (!response.ok) throw new Error(payload.error || 'Search results request failed')
       setSourceList(normalizeSources(payload.results || [], page))
       setResultsPage(page)
       setHasMoreResults(Boolean(payload.hasMore))
       setCurationMode(payload.curation?.mode || 'none')
+      setLocalRuntime(payload.runtime || null)
+      setRuntimeStages(payload.stages || [])
       document.querySelector('.results-scroller')?.scrollTo({ top: 0, behavior: 'smooth' })
     } catch (error) {
-      setApiError(error instanceof Error ? error.message : 'Could not load this page of results')
-    } finally { setRunning(false) }
+      if (!(error instanceof DOMException && error.name === 'AbortError')) setApiError(error instanceof Error ? error.message : 'Could not load this page of results')
+    } finally { if (activeRequest.current === request) { activeRequest.current = null; setRunning(false) } }
   }
 
   const connectProvider = async (id: string) => {
@@ -271,7 +325,10 @@ function App() {
     } catch (error) { setApiError(error instanceof Error ? error.message : 'Could not inspect the local OAuth session') }
   }
 
-  const updateProvider = (id: string, field: 'endpoint' | 'model' | 'apiKey', value: string) => setProviders((current) => current.map((item) => item.id === id ? { ...item, [field]: value } : item))
+  const updateProvider = (id: string, field: 'endpoint' | 'model' | 'apiKey', value: string) => {
+    if (id === 'lmstudio' && (field === 'endpoint' || field === 'model')) activeRequest.current?.abort()
+    setProviders((current) => current.map((item) => item.id === id ? { ...item, [field]: value } : item))
+  }
 
   const exportResearch = () => {
     const documentText = `${answerTitle}\n\n${cleanMarkdown(answer)}\n\nSources\n${sourceList.map((source) => `- ${source.title}: ${source.url || source.domain}`).join('\n')}`
@@ -348,13 +405,13 @@ function App() {
           </div>
         </header>
 
-        {view === 'providers' ? <ProvidersView providers={providers} selected={selectedProvider} onSelect={setSelectedProvider} onConnect={connectProvider} onCheck={checkProvider} onUpdateProvider={updateProvider} availableModels={availableModels} modelStatus={modelStatus} onDiscoverModels={discoverProviderModels} onTestModel={testProviderModel} searchEndpoint={searchEndpoint} onSearchEndpointChange={setSearchEndpoint} searchStatus={searchStatus} onTestSearch={testSearchEndpoint} /> : view === 'settings' ? <SettingsView preferences={preferences} onUpdate={(field, value) => setPreferences((current) => ({ ...current, [field]: value }))} onReset={() => setPreferences(defaultPreferences)} onClearHistory={() => { if (window.confirm('Clear all saved searches from this browser?')) setHistory([]) }} onOpenProviders={() => setView('providers')} /> : view === 'library' ? <LibraryView history={history} onOpen={openHistory} /> : (
+        {view === 'providers' ? <ProvidersView providers={providers} selected={selectedProvider} onSelect={setSelectedProvider} onConnect={connectProvider} onCheck={checkProvider} onUpdateProvider={updateProvider} availableModels={availableModels} modelStatus={modelStatus} onDiscoverModels={discoverProviderModels} onTestModel={testProviderModel} searchEndpoint={searchEndpoint} onSearchEndpointChange={setSearchEndpoint} searchStatus={searchStatus} onTestSearch={testSearchEndpoint} runtime={localRuntime} onProbeRuntime={probeLocalRuntime} onRefreshRuntime={refreshLocalRuntime} onClearRuntime={clearLocalRuntime} onUpdateRuntime={updateLocalRuntime} /> : view === 'settings' ? <SettingsView preferences={preferences} onUpdate={(field, value) => setPreferences((current) => ({ ...current, [field]: value }))} onReset={() => setPreferences(defaultPreferences)} onClearHistory={() => { if (window.confirm('Clear all saved searches from this browser?')) setHistory([]) }} onOpenProviders={() => setView('providers')} /> : view === 'library' ? <LibraryView history={history} onOpen={openHistory} /> : (
           <div className={`workspace ${view === 'search' ? 'web-search-workspace' : ''} ${view === 'research' ? 'research-workspace' : ''} ${preferences.resultDensity === 'compact' ? 'compact-results' : ''}`}>
             {isEmptySearch ? <EmptySearch input={input} mode={mode} provider={provider} models={activeModelOptions} currentMissing={activeModelMissing} onModelChange={(value) => updateProvider(provider.id, 'model', value)} onInput={setInput} onModeChange={selectMode} onSearch={(nextQuery) => { runResearch(nextQuery); setInput('') }} /> : isEmptyResearch ? <ResearchStart input={input} onInput={setInput} onSearch={(nextQuery) => { runResearch(nextQuery); setInput('') }} /> : <section className="answer-canvas">
               <div className="canvas-inner">
                 <div className="eyebrow-row"><span className="eyebrow"><Activity size={13} /> {running ? 'Researching' : 'Research complete'}</span><button className="quiet-button" onClick={shareResearch}><Link2 size={14} /> Share</button></div>
                 <h1>{answerTitle}</h1>
-                {view === 'research' ? <><div className="research-thread-head"><div><span>Deep research</span><h2>{answerTitle}</h2></div><div className="research-thread-tools"><button onClick={() => navigator.clipboard?.writeText(answer)} aria-label="Copy research"><Copy size={16} /></button><button onClick={shareResearch} aria-label="Share research"><Link2 size={16} /></button><button aria-label="More research actions" disabled title="More research actions are coming soon"><MoreHorizontal size={18} /></button></div></div><div className="research-layout"><article className="research-brief"><ResearchAnswer answer={answer} sources={sourceList} /></article><aside className="evidence-rail"><div className="evidence-rail-head"><strong>Evidence sources</strong><span>{sourceList.filter((source) => source.pageRead).length} read</span></div>{sourceList.map((source) => <EvidenceRow key={source.n} source={source} />)}</aside></div>{apiError && <div className="research-error"><CircleHelp size={15} /> {apiError}</div>}<TracePanel compact running={running} step={step} trace={traceSteps} /><div className="research-actions"><button onClick={() => navigator.clipboard?.writeText(answer)}><Copy size={15} /> Copy</button><button onClick={() => runResearch(query)}><RefreshCw size={15} /> Regenerate</button><button onClick={shareResearch}><Link2 size={15} /> Share</button><button onClick={exportResearch}><ArrowUpRight size={15} /> Export</button></div></> : <>{preferences.showOverview && <SearchOverview answer={answer} sources={sourceList} expanded={overviewExpanded} onToggle={() => setOverviewExpanded(!overviewExpanded)} />}<TracePanel compact running={running} step={step} trace={traceSteps} /><div className="search-filters" role="tablist" aria-label="Search scope">{([['general', 'Web'], ['news', 'News'], ['images', 'Images'], ['videos', 'Videos'], ['github', 'GitHub'], ['science', 'Academic']] as const).map(([value, label]) => <button key={value} className={searchCategory === value ? 'selected' : ''} onClick={() => { setSearchCategory(value); runResearch(query, value) }} role="tab" aria-selected={searchCategory === value}>{label}</button>)}</div><div className="results-scroller"><div className="sources-heading"><span>{searchCategory === 'github' ? 'GitHub results' : searchCategory === 'images' ? 'Image results' : searchCategory === 'videos' ? 'Video results' : searchCategory === 'news' ? 'Latest news' : 'Search results'}</span><span className={`source-count curation-status ${curationMode}`}>{running ? 'Gathering typed results…' : `${curationMode === 'ai' ? 'AI-curated' : curationMode === 'partial' ? 'AI-assisted' : curationMode === 'heuristic' ? 'Relevance-ranked' : 'Retrieved'} · Page ${resultsPage} · ${sourceList.length} results`}</span></div>{apiError && <div className="research-error"><CircleHelp size={15} /> {apiError}</div>}{searchCategory === 'images' ? <ImageResults sources={sourceList} onSelect={setSelectedImage} /> : searchCategory === 'videos' ? <VideoResults sources={sourceList} /> : <div className="source-list">{sourceList.map((source) => <SourceRow key={source.n} source={source} />)}</div>}</div><ResultPagination page={resultsPage} hasMore={hasMoreResults} running={running} onPage={loadResultsPage} />{selectedImage && <ImageLightbox source={selectedImage} onClose={() => setSelectedImage(null)} />}</>}
+                {view === 'research' ? <><div className="research-thread-head"><div><span>Deep research</span><h2>{answerTitle}</h2></div><div className="research-thread-tools"><button onClick={() => navigator.clipboard?.writeText(answer)} aria-label="Copy research"><Copy size={16} /></button><button onClick={shareResearch} aria-label="Share research"><Link2 size={16} /></button><button aria-label="More research actions" disabled title="More research actions are coming soon"><MoreHorizontal size={18} /></button></div></div><div className="research-layout"><article className="research-brief"><ResearchAnswer answer={answer} sources={sourceList} /></article><aside className="evidence-rail"><div className="evidence-rail-head"><strong>Evidence sources</strong><span>{sourceList.filter((source) => source.pageRead).length} read</span></div>{sourceList.map((source) => <EvidenceRow key={source.n} source={source} />)}</aside></div>{apiError && <div className="research-error"><CircleHelp size={15} /> {apiError}</div>}<LocalRuntimeStatus runtime={localRuntime} stages={runtimeStages} /><TracePanel compact running={running} step={step} trace={traceSteps} /><div className="research-actions"><button onClick={() => navigator.clipboard?.writeText(answer)}><Copy size={15} /> Copy</button><button onClick={() => runResearch(query)}><RefreshCw size={15} /> Regenerate</button><button onClick={shareResearch}><Link2 size={15} /> Share</button><button onClick={exportResearch}><ArrowUpRight size={15} /> Export</button></div></> : <>{preferences.showOverview && <SearchOverview answer={answer} sources={sourceList} expanded={overviewExpanded} onToggle={() => setOverviewExpanded(!overviewExpanded)} />}<LocalRuntimeStatus runtime={localRuntime} stages={runtimeStages} /><TracePanel compact running={running} step={step} trace={traceSteps} /><div className="search-filters" role="tablist" aria-label="Search scope">{([['general', 'Web'], ['news', 'News'], ['images', 'Images'], ['videos', 'Videos'], ['github', 'GitHub'], ['science', 'Academic']] as const).map(([value, label]) => <button key={value} className={searchCategory === value ? 'selected' : ''} onClick={() => { setSearchCategory(value); runResearch(query, value) }} role="tab" aria-selected={searchCategory === value}>{label}</button>)}</div><div className="results-scroller"><div className="sources-heading"><span>{searchCategory === 'github' ? 'GitHub results' : searchCategory === 'images' ? 'Image results' : searchCategory === 'videos' ? 'Video results' : searchCategory === 'news' ? 'Latest news' : 'Search results'}</span><span className={`source-count curation-status ${curationMode}`}>{running ? 'Gathering typed results…' : `${curationMode === 'ai' ? 'AI-curated' : curationMode === 'partial' ? 'AI-assisted' : curationMode === 'heuristic' ? 'Relevance-ranked' : 'Retrieved'} · Page ${resultsPage} · ${sourceList.length} results`}</span></div>{apiError && <div className="research-error"><CircleHelp size={15} /> {apiError}</div>}{searchCategory === 'images' ? <ImageResults sources={sourceList} onSelect={setSelectedImage} /> : searchCategory === 'videos' ? <VideoResults sources={sourceList} /> : <div className="source-list">{sourceList.map((source) => <SourceRow key={source.n} source={source} />)}</div>}</div><ResultPagination page={resultsPage} hasMore={hasMoreResults} running={running} onPage={loadResultsPage} />{selectedImage && <ImageLightbox source={selectedImage} onClose={() => setSelectedImage(null)} />}</>}
               </div>
             </section>}
           </div>
@@ -445,6 +502,13 @@ function SearchOverview({ answer, sources, expanded, onToggle }: { answer: strin
   return <div className="search-overview"><div><Sparkles size={15} /> AI overview</div><div className={`overview-content ${expanded ? 'expanded' : ''}`}>{content}</div><button className="overview-expand" onClick={onToggle}>{expanded ? 'Show less' : 'Show full overview'} <ChevronDown size={14} /></button>{sources.length > 0 && <div className="overview-sources" aria-label="Overview sources"><span>Sources</span>{sources.slice(0, 6).map((source) => <a href={source.url || '#'} target={source.url ? '_blank' : undefined} rel="noreferrer" key={source.n} title={source.title}><Favicon url={source.url} /><b>{source.domain}</b><small>{source.n}</small></a>)}</div>}</div>
 }
 
+function LocalRuntimeStatus({ runtime, stages }: { runtime: LocalRuntimeProfile | null; stages: Array<{ stage: string; status: string; durationMs?: number; attempts?: number; cached?: boolean; reason?: string }> }) {
+  if (!runtime && !stages.length) return null
+  const last = stages.at(-1)
+  const status = last?.cached ? 'Cached AI' : last?.status === 'success' ? 'AI active' : last?.status === 'failed' ? 'AI-assisted fallback' : runtime?.warmup === 'ready' ? 'Local model ready' : 'Local model unavailable'
+  return <div className="local-runtime-status"><span><Sparkles size={14} /> {status}</span><small>{runtime?.format && runtime.format !== 'unknown' ? `${runtime.format} format` : 'adaptive format'} · {runtime?.averageResponseMs ? `${(runtime.averageResponseMs / 1000).toFixed(1)}s avg` : 'timing learns after first response'}{runtime?.queue ? ` · ${runtime.queue.waiting ? `${runtime.queue.waiting} queued` : 'queue clear'}` : ''}</small>{last?.reason && <em title={last.reason}>Fallback preserved web results</em>}</div>
+}
+
 function EvidenceRow({ source }: { source: SearchSource }) {
   return <a className="evidence-row" href={source.url || '#'} target={source.url ? '_blank' : undefined} rel="noreferrer"><Favicon url={source.url} /><span><strong>{source.domain}</strong><small>{source.title}</small><em>{source.pageRead ? 'Read for synthesis' : source.aiReason || source.date}</em></span><ArrowUpRight size={15} /></a>
 }
@@ -479,7 +543,7 @@ function SettingsView({ preferences, onUpdate, onReset, onClearHistory, onOpenPr
   </div>
 }
 
-  function ProvidersView({ providers, selected, onSelect, onConnect, onCheck, onUpdateProvider, availableModels, modelStatus, onDiscoverModels, onTestModel, searchEndpoint, onSearchEndpointChange, searchStatus, onTestSearch }: { providers: Provider[]; selected: string; onSelect: (id: string) => void; onConnect: (id: string) => void; onCheck: (id: string) => void; onUpdateProvider: (id: string, field: 'endpoint' | 'model' | 'apiKey', value: string) => void; availableModels: Record<string, ModelOption[]>; modelStatus: Record<string, string>; onDiscoverModels: (id: string) => void; onTestModel: (id: string) => void; searchEndpoint: string; onSearchEndpointChange: (value: string) => void; searchStatus: string; onTestSearch: () => void }) {
+  function ProvidersView({ providers, selected, onSelect, onConnect, onCheck, onUpdateProvider, availableModels, modelStatus, onDiscoverModels, onTestModel, searchEndpoint, onSearchEndpointChange, searchStatus, onTestSearch, runtime, onProbeRuntime, onRefreshRuntime, onClearRuntime, onUpdateRuntime }: { providers: Provider[]; selected: string; onSelect: (id: string) => void; onConnect: (id: string) => void; onCheck: (id: string) => void; onUpdateProvider: (id: string, field: 'endpoint' | 'model' | 'apiKey', value: string) => void; availableModels: Record<string, ModelOption[]>; modelStatus: Record<string, string>; onDiscoverModels: (id: string) => void; onTestModel: (id: string) => void; searchEndpoint: string; onSearchEndpointChange: (value: string) => void; searchStatus: string; onTestSearch: () => void; runtime: LocalRuntimeProfile | null; onProbeRuntime: () => void; onRefreshRuntime: () => void; onClearRuntime: () => void; onUpdateRuntime: (patch: LocalRuntimeOverrides) => void }) {
     return <div className="settings-view">
       <div className="settings-heading"><div><span className="section-kicker">Connections</span><h1>Providers</h1><p>Choose the model that curates your web results. LM Studio tokens stay only in this browser session.</p><div className="default-model-summary"><Sparkles size={15} /> Default for new searches: <strong>{providers.find((provider) => provider.id === selected)?.name} · {providers.find((provider) => provider.id === selected)?.model}</strong></div></div><span className="settings-built-in">{providers.length} built-in providers</span></div>
       <div className="search-provider-card"><div><span className="provider-kind">Web search</span><h2>SearXNG</h2><p>Private metasearch for websites, documentation, GitHub, news, and more.</p></div><div className="search-endpoint-row"><label htmlFor="searxng-url">Instance URL</label><input id="searxng-url" value={searchEndpoint} onChange={(event) => onSearchEndpointChange(event.target.value)} /><button className="connect-button" onClick={onTestSearch}>Test connection</button></div>{searchStatus && <small className="search-status">{searchStatus}</small>}</div>
@@ -495,6 +559,7 @@ function SettingsView({ preferences, onUpdate, onReset, onClearHistory, onOpenPr
           <div className="provider-field provider-model-field"><small>{selected === provider.id ? 'Default model' : 'Saved model'}</small><select className="provider-model-select" aria-label={`${provider.name} model`} value={provider.model} onChange={(event) => onUpdateProvider(provider.id, 'model', event.target.value)}>{currentMissing && <option value={provider.model}>{provider.model} (current)</option>}{models.map((model) => <option key={model.id} value={model.id}>{model.label}{model.quantization ? ` · ${model.quantization}` : ''}</option>)}</select></div>
           <div className="provider-field provider-key-field"><label htmlFor={`${provider.id}-api-key`}>{provider.id === 'lmstudio' ? 'Server API key' : 'Account API key'}</label><input id={`${provider.id}-api-key`} className="provider-edit" aria-label={`${provider.name} API key`} type="password" autoComplete="off" value={provider.apiKey || ''} placeholder={provider.id === 'lmstudio' ? 'Optional LM Studio server token' : 'Optional — enables the live model catalog'} onChange={(event) => onUpdateProvider(provider.id, 'apiKey', event.target.value)} /></div>
           <div className="model-discovery"><span><button className="model-refresh" type="button" onClick={() => onDiscoverModels(provider.id)}><RefreshCw size={14} /> {provider.id === 'lmstudio' ? 'Refresh installed models' : 'Refresh available models'}</button><button className="model-test" type="button" onClick={() => onTestModel(provider.id)}>Test model connection</button></span>{modelStatus[provider.id] && <small className={/^(Connected|\d+ models available|Loading)/.test(modelStatus[provider.id]) ? 'model-status' : 'model-status error'}>{modelStatus[provider.id]}</small>}</div>
+          {provider.id === 'lmstudio' && <div className="local-runtime-panel"><div><strong>Local model reliability</strong><small>{runtime?.warmup === 'ready' ? `Warm · ${runtime.format || 'adaptive'} · ${runtime.averageResponseMs ? `${(runtime.averageResponseMs / 1000).toFixed(1)}s avg` : 'learning speed'}` : runtime?.warmup === 'failed' ? 'Warm-up needs attention' : 'Test or warm this model to build its profile'}{runtime?.queue ? ` · ${runtime.queue.waiting ? `${runtime.queue.waiting} queued` : 'queue clear'}` : ''}</small></div><div className="runtime-actions"><button type="button" onClick={onProbeRuntime}>Warm & probe</button><button type="button" onClick={onRefreshRuntime}>Refresh</button><button type="button" onClick={onClearRuntime}>Clear</button></div><div className="runtime-controls"><label>Format<select aria-label="LM Studio response format" value={provider.localRuntime?.format || 'auto'} onChange={(event) => onUpdateRuntime({ format: event.target.value as LocalRuntimeOverrides['format'] })}><option value="auto">Auto-detect</option><option value="json">Strict JSON</option><option value="fenced-json">Fenced JSON</option><option value="markdown">Markdown-compatible</option></select></label><label>Timeout<select aria-label="LM Studio timeout" value={provider.localRuntime?.timeoutMs || 180000} onChange={(event) => onUpdateRuntime({ timeoutMs: Number(event.target.value) })}><option value={60000}>1 min</option><option value={180000}>3 min</option><option value={300000}>5 min</option><option value={600000}>10 min</option></select></label><label>Retries<select aria-label="LM Studio retries" value={provider.localRuntime?.retryCount ?? 1} onChange={(event) => onUpdateRuntime({ retryCount: Number(event.target.value) })}><option value={0}>Off</option><option value={1}>1 retry</option><option value={2}>2 retries</option></select></label><label>Queue<select aria-label="LM Studio concurrency" value={provider.localRuntime?.concurrency || 1} onChange={(event) => onUpdateRuntime({ concurrency: Number(event.target.value) })}><option value={1}>1 request</option><option value={2}>2 requests</option></select></label><label>Context<select aria-label="LM Studio context budget" value={provider.localRuntime?.contextBudget || 6000} onChange={(event) => onUpdateRuntime({ contextBudget: Number(event.target.value) })}><option value={3000}>Small</option><option value={6000}>Balanced</option><option value={12000}>Large</option></select></label><label>Rank batch<select aria-label="LM Studio ranking batch size" value={provider.localRuntime?.rankingBatchSize || 10} onChange={(event) => onUpdateRuntime({ rankingBatchSize: Number(event.target.value) })}><option value={5}>5 results</option><option value={8}>8 results</option><option value={10}>10 results</option></select></label></div><div className="runtime-toggles"><button className={provider.localRuntime?.autoAdapt === false ? '' : 'on'} type="button" onClick={() => onUpdateRuntime({ autoAdapt: provider.localRuntime?.autoAdapt === false })}>Auto-adapt</button><button className={provider.localRuntime?.warmupEnabled === false ? '' : 'on'} type="button" onClick={() => onUpdateRuntime({ warmupEnabled: provider.localRuntime?.warmupEnabled === false })}>Warm-up enabled</button></div></div>}
           <button className={`use-provider-button ${selected === provider.id ? 'active' : ''}`} onClick={() => onSelect(provider.id)}>{selected === provider.id ? <><Check size={15} /> Default for new searches</> : 'Make default for new searches'}</button>
           {provider.id !== 'lmstudio' && <button className={`connect-button ${provider.connected ? 'connected-button' : ''}`} onClick={() => provider.connected ? onCheck(provider.id) : provider.authPending ? onCheck(provider.id) : onConnect(provider.id)}>{provider.connected ? <><Check size={15} /> OAuth connected</> : provider.authPending ? <>Check OAuth session <Settings size={14} /></> : <>Connect with OAuth <ArrowUpRight size={15} /></>}</button>}
         </div>
