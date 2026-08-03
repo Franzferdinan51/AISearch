@@ -8,6 +8,8 @@ const port = Number(process.env.LUMEN_API_PORT || 8787)
 const host = process.env.LUMEN_API_HOST || '127.0.0.1'
 const searxngUrl = process.env.SEARXNG_URL || 'http://127.0.0.1:8080'
 const cache = new Map()
+const rankedSearchCache = new Map()
+const rankedSearchWindowPages = 4
 const appRoot = path.dirname(fileURLToPath(import.meta.url))
 const distRoot = path.join(appRoot, 'dist')
 
@@ -122,6 +124,39 @@ async function searchSearxng(query, depth = 'quick', maxResults = 10, configured
   const value = { provider: 'searxng', query, depth, page: safePage, pageSize: maxResults, hasMore: results.length >= maxResults, results: results.slice(0, maxResults), errors, queries: queriesFor(query, depth), budget: { requested: depth === 'deep' ? 3 : 1, used: queriesFor(query, depth).length } }
   cache.set(key, { createdAt: Date.now(), value })
   return value
+}
+
+async function searchRankedWindow(query, maxResults = 10, configuredUrl = searxngUrl, category = 'general', requestedPage = 1, provider = 'lmstudio', override = {}, curate = true) {
+  const page = Math.max(1, Math.floor(Number(requestedPage) || 1))
+  const pageSize = Math.min(Math.max(1, Number(maxResults) || 10), 10)
+  const cacheKey = JSON.stringify({ query, pageSize, configuredUrl, category, provider, endpoint: override.endpoint || '', model: override.model || '', curate })
+  const hit = rankedSearchCache.get(cacheKey)
+  let ranked
+
+  if (hit && Date.now() - hit.createdAt < 300_000) {
+    ranked = { ...hit.value, cached: true }
+  } else {
+    const pages = await Promise.all(Array.from({ length: rankedSearchWindowPages }, (_, index) => searchSearxng(query, 'quick', pageSize, configuredUrl, category, index + 1)))
+    const seenUrls = new Set()
+    const candidates = pages.flatMap((result) => result.results).filter((item) => {
+      if (seenUrls.has(item.url)) return false
+      seenUrls.add(item.url)
+      return true
+    })
+    const curation = curate ? await curateResults(provider, query, candidates, override) : { results: candidates, mode: 'disabled', error: null }
+    ranked = {
+      provider: pages[0]?.provider || 'searxng', query, depth: 'quick', pageSize,
+      results: curation.results,
+      errors: pages.flatMap((result) => result.errors),
+      queries: [query],
+      budget: { requested: rankedSearchWindowPages, used: rankedSearchWindowPages },
+      curation: { mode: curation.mode, error: curation.error },
+    }
+    rankedSearchCache.set(cacheKey, { createdAt: Date.now(), value: ranked })
+  }
+
+  const start = (page - 1) * pageSize
+  return { ...ranked, page, hasMore: ranked.results.length > start + pageSize, results: ranked.results.slice(start, start + pageSize) }
 }
 
 function decodeHtml(value) {
@@ -279,7 +314,7 @@ function parseCuratedRanking(output, query, results) {
 
 async function curateResults(provider, query, results, override = {}) {
   if (!results.length) return { results, mode: 'none', error: null }
-  const sourceList = results.map((item, index) => `${index + 1}. ${item.title}\n${item.url}\n${item.content.slice(0, 420)}`).join('\n\n')
+  const sourceList = results.map((item, index) => `${index + 1}. ${item.title}\n${item.url}\n${item.content.slice(0, 260)}`).join('\n\n')
   const prompt = `Query: ${query}\n\nRank these website results for the user's intent. Prefer direct, trustworthy, useful sources. Do not invent facts. Return ONLY a JSON array containing every id once, each as {"id": number, "score": 0-100, "reason": "short tailored reason"}.\n\nCandidates:\n${sourceList}`
   try {
     if (provider !== 'lmstudio' && (await commandStatus(provider)).authenticated) {
@@ -399,9 +434,8 @@ async function handle(req, res) {
     const body = await readBody(req)
     if (!body.query || typeof body.query !== 'string') return json(res, 400, { error: 'query is required' })
     const selectedProvider = modelRuntimes[body.provider] ? body.provider : 'lmstudio'
-    const search = await searchSearxng(body.query.trim().slice(0, 500), body.depth === 'deep' ? 'deep' : 'quick', Math.min(Number(body.maxResults) || 10, 10), body.baseUrl || searxngUrl, body.category || 'general', body.page)
-    const curation = body.curate === false ? { results: search.results, mode: 'disabled', error: null } : await curateResults(selectedProvider, body.query, search.results, body.providerConfig || {})
-    return json(res, 200, { ...search, results: curation.results, curation: { mode: curation.mode, error: curation.error } })
+    const search = await searchRankedWindow(body.query.trim().slice(0, 500), Math.min(Number(body.maxResults) || 10, 10), body.baseUrl || searxngUrl, body.category || 'general', body.page, selectedProvider, body.providerConfig || {}, body.curate !== false)
+    return json(res, 200, search)
   }
   if (req.method === 'POST' && url.pathname === '/api/research') {
     const body = await readBody(req)
