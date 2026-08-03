@@ -31,13 +31,13 @@ const initialProviders: Provider[] = [
   { id: 'grok', name: 'Grok / xAI', model: 'grok-4.5', endpoint: 'https://api.x.ai/v1', kind: 'OAuth', connected: false, color: '#b7c2d5' },
 ]
 
-type SearchSource = { n: string; title: string; domain: string; date: string; url?: string; snippet?: string }
+type SearchSource = { n: string; title: string; domain: string; date: string; url?: string; snippet?: string; aiScore?: number; aiReason?: string }
 type SearchSession = { id: string; query: string; createdAt: string; sources: SearchSource[]; answer: string }
 type TraceStep = { step: string; status: string; detail: string }
-function normalizeSources(results: Array<{ title: string; url: string; content?: string; publishedDate?: string }>, page = 1): SearchSource[] {
+function normalizeSources(results: Array<{ title: string; url: string; content?: string; publishedDate?: string; aiScore?: number; aiReason?: string }>, page = 1): SearchSource[] {
   return results.flatMap((item, index) => {
     try {
-      return [{ n: String((page - 1) * 10 + index + 1), title: item.title, domain: new URL(item.url).hostname, date: item.publishedDate || 'Retrieved just now', url: item.url, snippet: item.content }]
+      return [{ n: String((page - 1) * 10 + index + 1), title: item.title, domain: new URL(item.url).hostname, date: item.publishedDate || 'Retrieved just now', url: item.url, snippet: item.content, aiScore: item.aiScore, aiReason: item.aiReason }]
     } catch { return [] }
   })
 }
@@ -56,6 +56,7 @@ function App() {
   const [step, setStep] = useState(4)
   const [resultsPage, setResultsPage] = useState(1)
   const [hasMoreResults, setHasMoreResults] = useState(true)
+  const [curationMode, setCurationMode] = useState<'ai' | 'heuristic' | 'disabled' | 'none'>('none')
   const [sourceList, setSourceList] = useState<SearchSource[]>([])
   const [answer, setAnswer] = useState('')
   const [history, setHistory] = useState<SearchSession[]>(() => { try { return JSON.parse(localStorage.getItem('lumen-history') || '[]') } catch { return [] } })
@@ -67,6 +68,7 @@ function App() {
 
   const provider = providers.find((item) => item.id === selectedProvider) ?? providers[0]
   const isEmptySearch = view === 'search' && !query && !running && sourceList.length === 0
+  const isEmptyResearch = view === 'research' && !query && !running && sourceList.length === 0
 
   useEffect(() => {
     const saved = localStorage.getItem('lumen-providers')
@@ -113,6 +115,7 @@ function App() {
       const normalized = normalizeSources(payload.search?.results || payload.results || [], 1)
       if (normalized.length) setSourceList(normalized)
       setHasMoreResults(Boolean(payload.search?.hasMore ?? payload.hasMore))
+      setCurationMode(payload.search?.curation?.mode || 'none')
       setAnswer(payload.answer || 'Research completed.')
       if (payload.trace) setTraceSteps(payload.trace)
       if (normalized.length) setHistory((current) => [{ id: crypto.randomUUID(), query: nextQuery, createdAt: new Date().toISOString(), sources: normalized, answer: payload.answer || '' }, ...current.filter((item) => item.query !== nextQuery)].slice(0, 20))
@@ -130,12 +133,13 @@ function App() {
     setRunning(true)
     setApiError('')
     try {
-      const response = await fetch('/api/search', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ query, baseUrl: searchEndpoint, category: searchCategory, depth: 'quick', maxResults: 10, page }) })
+      const response = await fetch('/api/search', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ query, baseUrl: searchEndpoint, category: searchCategory, depth: 'quick', maxResults: 10, page, provider: selectedProvider, providerConfig: { endpoint: provider.endpoint, model: provider.model }, curate: true }) })
       const payload = await response.json()
       if (!response.ok) throw new Error(payload.error || 'Search results request failed')
       setSourceList(normalizeSources(payload.results || [], page))
       setResultsPage(page)
       setHasMoreResults(Boolean(payload.hasMore))
+      setCurationMode(payload.curation?.mode || 'none')
       document.querySelector('.results-scroller')?.scrollTo({ top: 0, behavior: 'smooth' })
     } catch (error) {
       setApiError(error instanceof Error ? error.message : 'Could not load this page of results')
@@ -178,7 +182,7 @@ function App() {
 
   const answerTitle = useMemo(() => query || 'Start a new research thread', [query])
   const openHistory = (session: SearchSession) => { setQuery(session.query); setSourceList(session.sources); setAnswer(session.answer); setResultsPage(1); setHasMoreResults(true); setView('search') }
-  const newSearch = () => { setView('search'); setQuery(''); setInput(''); setSourceList([]); setAnswer(''); setTraceSteps([]); setApiError(''); setResultsPage(1); setHasMoreResults(true); setRunning(false) }
+  const newSearch = () => { setView('search'); setQuery(''); setInput(''); setSourceList([]); setAnswer(''); setTraceSteps([]); setApiError(''); setResultsPage(1); setHasMoreResults(true); setCurationMode('none'); setRunning(false) }
 
   return (
     <div className="app-shell">
@@ -218,17 +222,17 @@ function App() {
 
         {view === 'providers' ? <ProvidersView providers={providers} selected={selectedProvider} onConnect={connectProvider} onCheck={checkProvider} onUpdateProvider={updateProvider} searchEndpoint={searchEndpoint} onSearchEndpointChange={setSearchEndpoint} searchStatus={searchStatus} onTestSearch={testSearchEndpoint} /> : view === 'library' ? <LibraryView history={history} onOpen={openHistory} /> : (
           <div className={`workspace ${view === 'search' ? 'web-search-workspace' : ''}`}>
-            {isEmptySearch ? <EmptySearch input={input} onInput={setInput} onSearch={(nextQuery) => { runResearch(nextQuery); setInput('') }} /> : <section className="answer-canvas">
+            {isEmptySearch ? <EmptySearch input={input} onInput={setInput} onSearch={(nextQuery) => { runResearch(nextQuery); setInput('') }} /> : isEmptyResearch ? <ResearchStart input={input} onInput={setInput} onSearch={(nextQuery) => { runResearch(nextQuery); setInput('') }} /> : <section className="answer-canvas">
               <div className="canvas-inner">
                 <div className="eyebrow-row"><span className="eyebrow"><Activity size={13} /> {running ? 'Researching' : 'Research complete'}</span><button className="quiet-button"><Link2 size={14} /> Share</button></div>
                 <h1>{answerTitle}</h1>
-                {view === 'research' ? <><h2>Synthesis</h2><p>{answer}</p><TracePanel compact running={running} step={step} trace={traceSteps} /><p>SearXNG continues to evolve as a privacy-first metasearch backbone, adding improved engine adapters, query transformations, and local ranking plugins. Lumen keeps the retrieval layer separate so you can inspect the web evidence before asking a model to synthesize it <cite>[1][3]</cite>.</p><p>Agentic research adds planning, source ranking, contradiction checks, and explainability on top of ordinary web search—so the agent can justify an answer instead of hiding the trail <cite>[2][3]</cite>.</p><div className="sources-heading"><span>Research sources</span><span className="source-count">{sourceList.length} websites</span></div>{apiError && <div className="research-error"><CircleHelp size={15} /> {apiError}</div>}<div className="source-list">{sourceList.map((source) => <SourceRow key={source.n} source={source} />)}</div></> : <><div className="search-overview"><div><Sparkles size={15} /> AI overview</div><p>{answer}</p></div><TracePanel compact running={running} step={step} trace={traceSteps} /><div className="search-filters" role="tablist" aria-label="Search scope">{([['general', 'Web'], ['news', 'News'], ['science', 'Academic']] as const).map(([value, label]) => <button key={value} className={searchCategory === value ? 'selected' : ''} onClick={() => { setSearchCategory(value); runResearch(query, value) }} role="tab" aria-selected={searchCategory === value}>{label}</button>)}</div><div className="results-scroller"><div className="sources-heading"><span>Search results</span><span className="source-count">Page {resultsPage} · {sourceList.length} websites</span></div>{apiError && <div className="research-error"><CircleHelp size={15} /> {apiError}</div>}<div className="source-list">{sourceList.map((source) => <SourceRow key={source.n} source={source} />)}</div><nav className="pagination" aria-label="Search result pages"><button disabled={resultsPage === 1 || running} onClick={() => loadResultsPage(resultsPage - 1)}>Previous</button>{[resultsPage - 1, resultsPage, resultsPage + 1].filter((page) => page > 0 && (page <= resultsPage || hasMoreResults)).map((page) => <button key={page} className={page === resultsPage ? 'active' : ''} disabled={running} onClick={() => loadResultsPage(page)} aria-current={page === resultsPage ? 'page' : undefined}>{page}</button>)}<button disabled={!hasMoreResults || running} onClick={() => loadResultsPage(resultsPage + 1)}>Next</button></nav></div></>}
+                {view === 'research' ? <><div className="research-brief"><span>Deep research brief</span><h2>{answerTitle}</h2><p>{answer}</p></div><TracePanel compact running={running} step={step} trace={traceSteps} /><div className="sources-heading"><span>Evidence reviewed</span><span className="source-count">{sourceList.length} curated websites</span></div>{apiError && <div className="research-error"><CircleHelp size={15} /> {apiError}</div>}<div className="source-list">{sourceList.map((source) => <SourceRow key={source.n} source={source} />)}</div></> : <><div className="search-overview"><div><Sparkles size={15} /> AI overview</div><p>{answer}</p></div><TracePanel compact running={running} step={step} trace={traceSteps} /><div className="search-filters" role="tablist" aria-label="Search scope">{([['general', 'Web'], ['news', 'News'], ['science', 'Academic']] as const).map(([value, label]) => <button key={value} className={searchCategory === value ? 'selected' : ''} onClick={() => { setSearchCategory(value); runResearch(query, value) }} role="tab" aria-selected={searchCategory === value}>{label}</button>)}</div><div className="results-scroller"><div className="sources-heading"><span>Search results</span><span className={`source-count curation-status ${curationMode}`}>{curationMode === 'ai' ? 'AI-curated' : curationMode === 'heuristic' ? 'Relevance-ranked' : 'Retrieved'} · Page {resultsPage} · {sourceList.length} websites</span></div>{apiError && <div className="research-error"><CircleHelp size={15} /> {apiError}</div>}<div className="source-list">{sourceList.map((source) => <SourceRow key={source.n} source={source} />)}</div><nav className="pagination" aria-label="Search result pages"><button disabled={resultsPage === 1 || running} onClick={() => loadResultsPage(resultsPage - 1)}>Previous</button>{[resultsPage - 1, resultsPage, resultsPage + 1].filter((page) => page > 0 && (page <= resultsPage || hasMoreResults)).map((page) => <button key={page} className={page === resultsPage ? 'active' : ''} disabled={running} onClick={() => loadResultsPage(page)} aria-current={page === resultsPage ? 'page' : undefined}>{page}</button>)}<button disabled={!hasMoreResults || running} onClick={() => loadResultsPage(resultsPage + 1)}>Next</button></nav></div></>}
               </div>
             </section>}
           </div>
         )}
 
-        {view !== 'providers' && view !== 'library' && !isEmptySearch && <form className="composer" onSubmit={(event) => { event.preventDefault(); if (input.trim()) { runResearch(input); setInput('') } }}>
+        {view !== 'providers' && view !== 'library' && !isEmptySearch && !isEmptyResearch && <form className="composer" onSubmit={(event) => { event.preventDefault(); if (input.trim()) { runResearch(input); setInput('') } }}>
           <button type="button" className="attach-button" aria-label="Attach a file"><Paperclip size={19} /></button>
           <textarea value={input} onChange={(event) => setInput(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); if (input.trim()) { runResearch(input); setInput('') } } }} placeholder="Ask a follow-up or refine the research..." rows={1} />
           <div className="composer-footer"><span>Press Enter to send&nbsp; · &nbsp;Shift+Enter for new line</span><button className="send-button" aria-label="Send research query"><Send size={19} /></button></div>
@@ -246,6 +250,7 @@ function SourceRow({ source }: { source: SearchSource }) {
     <div className="result-topline"><span className="result-index">{source.n}</span><Favicon url={source.url} /><span className="result-domain">{source.domain}</span><span className="result-kind">Web</span><ArrowUpRight size={15} /></div>
     <strong>{source.title}</strong>
     {source.snippet && <em>{source.snippet}</em>}
+    {source.aiReason && <span className="curation-reason"><Sparkles size={13} /> {source.aiReason}{typeof source.aiScore === 'number' && <b>{source.aiScore}% match</b>}</span>}
   </a>
 }
 
@@ -262,6 +267,11 @@ function EmptySearch({ input, onInput, onSearch }: { input: string; onInput: (va
   ]
   const submit = (event: React.FormEvent) => { event.preventDefault(); if (input.trim()) onSearch(input.trim()) }
   return <section className="empty-search-canvas"><div className="empty-search-inner"><h1>Hi Duckets, what would you like to search?</h1><form className="empty-search-composer" onSubmit={submit}><textarea value={input} onChange={(event) => onInput(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); if (input.trim()) onSearch(input.trim()) } }} placeholder="Ask anything" rows={1} autoFocus /><div className="empty-composer-actions"><button type="button" className="empty-attach" aria-label="Attach a file"><Plus size={24} /></button><button className="empty-submit" aria-label="Search"><Search size={22} /></button></div></form><div className="search-suggestions">{suggestions.map((suggestion) => <button key={suggestion} onClick={() => onSearch(suggestion)}><Sparkles size={20} />{suggestion}</button>)}</div></div></section>
+}
+
+function ResearchStart({ input, onInput, onSearch }: { input: string; onInput: (value: string) => void; onSearch: (query: string) => void }) {
+  const submit = (event: React.FormEvent) => { event.preventDefault(); if (input.trim()) onSearch(input.trim()) }
+  return <section className="research-start"><div className="research-start-inner"><span>Deep research</span><h1>Follow a question wherever the web leads.</h1><p>Lumen plans a bounded search, curates the strongest website evidence, reads source pages, and produces a grounded answer you can inspect.</p><form className="research-start-form" onSubmit={submit}><textarea value={input} onChange={(event) => onInput(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); if (input.trim()) onSearch(input.trim()) } }} placeholder="What would you like to investigate?" rows={2} /><button><Sparkles size={18} /> Start research</button></form><div className="research-start-steps"><span><b>01</b> Plan focused web queries</span><span><b>02</b> Curate and read evidence</span><span><b>03</b> Cross-check the answer</span></div></div></section>
 }
 
 function TracePanel({ running, step, trace, compact = false }: { running: boolean; step: number; trace: TraceStep[]; compact?: boolean }) {

@@ -187,19 +187,66 @@ function extractCliText(provider, output) {
   return output.trim()
 }
 
-async function synthesize(provider, query, results, override = {}) {
+async function chatCompletion(provider, system, prompt, override = {}) {
   const runtime = { ...(modelRuntimes[provider] || modelRuntimes.lmstudio), endpoint: override.endpoint || undefined, model: override.model || undefined }
   runtime.endpoint ||= modelRuntimes[provider]?.endpoint || modelRuntimes.lmstudio.endpoint
   runtime.model ||= modelRuntimes[provider]?.model || modelRuntimes.lmstudio.model
-  const context = results.slice(0, 8).map((item, index) => `[${index + 1}] ${item.pageTitle || item.title}\n${item.url}\n${item.pageText || item.content}`).join('\n\n')
   const endpoint = new URL('/chat/completions', safeUrl(runtime.endpoint))
   const response = await fetch(endpoint, {
     method: 'POST', signal: AbortSignal.timeout(45_000), headers: { 'content-type': 'application/json', ...(runtime.key ? { authorization: `Bearer ${runtime.key}` } : {}) },
-    body: JSON.stringify({ model: runtime.model, temperature: 0.2, messages: [{ role: 'system', content: 'You are Lumen, a careful research agent. Synthesize only from the supplied sources, cite claims as [1], [2], and say when evidence is insufficient. Keep the answer to three concise paragraphs.' }, { role: 'user', content: `Question: ${query}\n\nSources:\n${context}` }] }),
+    body: JSON.stringify({ model: runtime.model, temperature: 0.1, messages: [{ role: 'system', content: system }, { role: 'user', content: prompt }] }),
   })
   if (!response.ok) throw new Error(`${provider} returned ${response.status}`)
   const payload = await response.json()
   return payload.choices?.[0]?.message?.content || ''
+}
+
+async function synthesize(provider, query, results, override = {}) {
+  const context = results.slice(0, 8).map((item, index) => `[${index + 1}] ${item.pageTitle || item.title}\n${item.url}\n${item.pageText || item.content}`).join('\n\n')
+  return chatCompletion(provider, 'You are Lumen, a careful research agent. Synthesize only from the supplied sources, cite claims as [1], [2], and say when evidence is insufficient. Keep the answer to three concise paragraphs.', `Question: ${query}\n\nSources:\n${context}`, override)
+}
+
+function heuristicRank(query, results) {
+  const terms = query.toLowerCase().match(/[a-z0-9]{3,}/g) || []
+  return results.map((item, index) => {
+    const title = item.title.toLowerCase()
+    const content = item.content.toLowerCase()
+    const score = terms.reduce((total, term) => total + (title.includes(term) ? 18 : 0) + (content.includes(term) ? 4 : 0), 0) + Math.max(0, 10 - index)
+    return { ...item, aiScore: score, aiReason: terms.length ? `Matches ${terms.filter((term) => title.includes(term) || content.includes(term)).slice(0, 2).join(' and ') || 'the requested topic'}.` : 'Relevant to the requested topic.' }
+  }).sort((a, b) => b.aiScore - a.aiScore)
+}
+
+function parseCuratedRanking(output, query, results) {
+  const match = output.replace(/```json|```/gi, '').match(/\[[\s\S]*\]/)
+  if (!match) throw new Error('Model did not return a ranking list')
+  const ranked = JSON.parse(match[0])
+  if (!Array.isArray(ranked)) throw new Error('Model ranking was not an array')
+  const byId = new Map(results.map((item, index) => [index + 1, item]))
+  const used = new Set()
+  const curated = ranked.flatMap((entry) => {
+    const id = Number(entry.id)
+    const item = byId.get(id)
+    if (!item || used.has(id)) return []
+    used.add(id)
+    return [{ ...item, aiScore: Math.max(0, Math.min(100, Number(entry.score) || 0)), aiReason: String(entry.reason || `Relevant to “${query}”.`).slice(0, 180) }]
+  })
+  return [...curated, ...heuristicRank(query, results.filter((_, index) => !used.has(index + 1)))]
+}
+
+async function curateResults(provider, query, results, override = {}) {
+  if (!results.length) return { results, mode: 'none', error: null }
+  const sourceList = results.map((item, index) => `${index + 1}. ${item.title}\n${item.url}\n${item.content.slice(0, 420)}`).join('\n\n')
+  const prompt = `Query: ${query}\n\nRank these website results for the user's intent. Prefer direct, trustworthy, useful sources. Do not invent facts. Return ONLY a JSON array containing every id once, each as {"id": number, "score": 0-100, "reason": "short tailored reason"}.\n\nCandidates:\n${sourceList}`
+  try {
+    if (provider !== 'lmstudio' && (await commandStatus(provider)).authenticated) {
+      const output = await curateViaCli(provider, prompt)
+      return { results: parseCuratedRanking(output, query, results), mode: 'ai', error: null }
+    }
+    const output = await chatCompletion(provider, 'You are a web search ranking model. Your only job is to rank the supplied search results for the user query.', prompt, override)
+    return { results: parseCuratedRanking(output, query, results), mode: 'ai', error: null }
+  } catch (error) {
+    return { results: heuristicRank(query, results), mode: 'heuristic', error: error.message }
+  }
 }
 
 async function synthesizeViaCli(provider, query, results) {
@@ -220,6 +267,25 @@ async function synthesizeViaCli(provider, query, results) {
   } else return ''
   const result = await runCommand(command, args)
   if (!result.ok) throw new Error(result.error || `${provider} CLI synthesis failed`)
+  return extractCliText(provider, result.output).replace(/<think>[\s\S]*?<\/think>/gi, '').trim()
+}
+
+async function curateViaCli(provider, prompt) {
+  let command
+  let args
+  if (provider === 'openai') {
+    command = providerCommands.openai
+    args = ['exec', '--ephemeral', '--skip-git-repo-check', '--sandbox', 'read-only', '--json', prompt]
+    if (providerCliModels.openai) args.splice(1, 0, '--model', providerCliModels.openai)
+  } else if (provider === 'minimax') {
+    command = providerCommands.minimax
+    args = ['text', 'chat', '--output', 'json', '--non-interactive', '--message', prompt]
+  } else if (provider === 'grok') {
+    command = providerCommands.grok
+    args = ['--output-format', 'json', '--max-turns', '1', '--no-plan', '--disable-web-search', '--single', prompt]
+  } else return ''
+  const result = await runCommand(command, args)
+  if (!result.ok) throw new Error(result.error || `${provider} CLI ranking failed`)
   return extractCliText(provider, result.output).replace(/<think>[\s\S]*?<\/think>/gi, '').trim()
 }
 
@@ -282,15 +348,20 @@ async function handle(req, res) {
   if (req.method === 'POST' && url.pathname === '/api/search') {
     const body = await readBody(req)
     if (!body.query || typeof body.query !== 'string') return json(res, 400, { error: 'query is required' })
-    return json(res, 200, await searchSearxng(body.query.trim().slice(0, 500), body.depth === 'deep' ? 'deep' : 'quick', Math.min(Number(body.maxResults) || 10, 10), body.baseUrl || searxngUrl, body.category || 'general', body.page))
+    const selectedProvider = modelRuntimes[body.provider] ? body.provider : 'lmstudio'
+    const search = await searchSearxng(body.query.trim().slice(0, 500), body.depth === 'deep' ? 'deep' : 'quick', Math.min(Number(body.maxResults) || 10, 10), body.baseUrl || searxngUrl, body.category || 'general', body.page)
+    const curation = body.curate === false ? { results: search.results, mode: 'disabled', error: null } : await curateResults(selectedProvider, body.query, search.results, body.providerConfig || {})
+    return json(res, 200, { ...search, results: curation.results, curation: { mode: curation.mode, error: curation.error } })
   }
   if (req.method === 'POST' && url.pathname === '/api/research') {
     const body = await readBody(req)
     if (!body.query || typeof body.query !== 'string') return json(res, 400, { error: 'query is required' })
     const selectedProvider = modelRuntimes[body.provider] ? body.provider : 'lmstudio'
     const search = await searchSearxng(body.query.trim().slice(0, 500), body.depth === 'quick' ? 'quick' : 'deep', Math.min(Number(body.maxResults) || 10, 10), body.baseUrl || searxngUrl, body.category || 'general', body.page)
-    const pagePass = body.depth === 'quick' || !search.results.length ? { results: search.results, errors: [] } : await readTopSourcePages(search.results)
-    const researchSearch = { ...search, results: pagePass.results, errors: [...search.errors, ...pagePass.errors], pageReads: pagePass.results.filter((item) => item.pageText).length }
+    const curation = await curateResults(selectedProvider, body.query, search.results, body.providerConfig || {})
+    const curatedSearch = { ...search, results: curation.results, curation: { mode: curation.mode, error: curation.error } }
+    const pagePass = body.depth === 'quick' || !curatedSearch.results.length ? { results: curatedSearch.results, errors: [] } : await readTopSourcePages(curatedSearch.results)
+    const researchSearch = { ...curatedSearch, results: pagePass.results, errors: [...search.errors, ...pagePass.errors], pageReads: pagePass.results.filter((item) => item.pageText).length }
     let answer = ''
     let synthesisMode = 'api'
     const synthesisErrors = []
@@ -310,7 +381,7 @@ async function handle(req, res) {
       { step: 'Plan', status: 'complete', detail: `Generated ${search.queries.length} bounded search queries.` },
       { step: 'Query SearXNG', status: researchSearch.results.length ? 'complete' : 'error', detail: `Retrieved ${researchSearch.results.length} unique website results.` },
       { step: 'Read source pages', status: body.depth === 'quick' ? 'skipped' : researchSearch.pageReads ? 'complete' : 'skipped', detail: body.depth === 'quick' ? 'Quick search uses result snippets without page crawling.' : `Read ${researchSearch.pageReads} top source pages for deeper evidence.` },
-      { step: 'Rank sources', status: researchSearch.results.length ? 'complete' : 'skipped', detail: 'Deduplicated URLs and preserved source metadata.' },
+      { step: 'Rank sources', status: researchSearch.results.length ? (curation.mode === 'ai' ? 'complete' : 'skipped') : 'skipped', detail: curation.mode === 'ai' ? `AI-ranked ${researchSearch.results.length} sources for the requested intent.` : `Model ranking unavailable; used transparent lexical fallback${curation.error ? '.' : ''}` },
       { step: 'Cross-check', status: researchSearch.results.length > 1 ? 'complete' : 'skipped', detail: 'Prepared multiple sources for contradiction-aware synthesis.' },
       { step: 'Synthesize', status: answer ? 'complete' : 'error', detail: answer ? `Synthesized with ${selectedProvider}${synthesisMode === 'oauth-cli' ? ' OAuth session' : ''}.` : 'No model synthesis was produced.' },
     ]
