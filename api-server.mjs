@@ -157,7 +157,13 @@ async function searchRankedWindow(query, maxResults = 10, configuredUrl = searxn
           seenUrls.add(item.url)
           return true
         })
-        const curation = curate ? await curateResults(provider, query, candidates, override, null, includeOverview) : { results: candidates, mode: 'disabled', error: null, overview: '', plan: null }
+        let curation
+        try {
+          curation = curate ? await curateResults(provider, query, candidates, override, null, includeOverview) : { results: candidates, mode: 'disabled', error: null, overview: '', plan: null }
+        } catch (error) {
+          curation = { results: heuristicRank(query, candidates), mode: 'heuristic', error: error.message, overview: '', plan: null }
+        }
+        if (!Array.isArray(curation.results) || !curation.results.length) curation = { ...curation, results: heuristicRank(query, candidates), mode: 'heuristic', error: curation.error || 'AI response did not include usable rankings.' }
         const answer = curation.overview || ''
         const overviewError = includeOverview && !answer ? curation.error : null
         const plan = curation.plan || { mode: 'fallback', focus: 'Match the user intent with direct, trustworthy websites.', criteria: [], error: curation.error || null }
@@ -387,6 +393,15 @@ function parseSearchIntelligence(output, query, results) {
   }
 }
 
+function salvageOverview(output) {
+  try {
+    const value = parseJsonObject(output, 'search intelligence')
+    if (typeof value.overview === 'string' && value.overview.trim()) return value.overview.trim()
+  } catch {}
+  const plainText = output.replace(/```(?:json|markdown)?/gi, '').trim()
+  return plainText.length >= 80 && !plainText.startsWith('[') && !plainText.startsWith('{') ? plainText.slice(0, 8_000) : ''
+}
+
 async function curateResults(provider, query, results, override = {}, plan = null, includeOverview = false) {
   if (!results.length) return { results, mode: 'none', error: null }
   const sourceList = results.map((item, index) => `${index + 1}. ${item.title.slice(0, 120)} | ${new URL(item.url).hostname} | ${item.content.replace(/\s+/g, ' ').slice(0, 100)}`).join('\n')
@@ -394,7 +409,8 @@ async function curateResults(provider, query, results, override = {}, plan = nul
     const prompt = `Query: ${query}\n\nReturn ONLY JSON: {"plan":{"focus":"short","criteria":["short"]},"ranking":[{"id":number,"score":0-100,"reason":"max 8 words"}],"overview":"concise Markdown answer with [id] citations"}. Rank every candidate exactly once. The overview must directly answer the query from the candidates only.\n\nCandidates:\n${sourceList}`
     try {
       const output = await chatCompletion(provider, 'You are Lumen\'s compact search intelligence engine. Plan, rank, and write one evidence-grounded overview in a single response.', prompt, override, { timeoutMs: 55_000, maxTokens: Math.min(1_050, 300 + results.length * 18) })
-      return { ...parseSearchIntelligence(output, query, results), mode: 'ai', error: null }
+      try { return { ...parseSearchIntelligence(output, query, results), mode: 'ai', error: null } }
+      catch (error) { return { results: heuristicRank(query, results), mode: 'heuristic', error: `AI returned an incomplete ranking: ${error.message}`, overview: salvageOverview(output), plan: null } }
     } catch (error) {
       return { results: heuristicRank(query, results), mode: 'heuristic', error: error.message, overview: '', plan: null }
     }
