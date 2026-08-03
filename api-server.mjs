@@ -70,13 +70,36 @@ function queriesFor(query, depth) {
   return [query, `${query} technical report`, `${query} latest developments`]
 }
 
+async function searchGitHubRepositories(query, page = 1, maxResults = 10) {
+  try {
+    const url = new URL('https://api.github.com/search/repositories')
+    const focusedQuery = query.replace(/\b(what|are|the|most|useful|right|now|how|does|can|could|should|with|for|and|that|this|these|best)\b/gi, ' ').replace(/[^\w\s.+#-]/g, ' ').replace(/\s+/g, ' ').trim() || query
+    url.searchParams.set('q', focusedQuery)
+    url.searchParams.set('sort', 'stars')
+    url.searchParams.set('order', 'desc')
+    url.searchParams.set('per_page', String(maxResults))
+    url.searchParams.set('page', String(page))
+    const response = await fetch(url, { signal: AbortSignal.timeout(12_000), headers: { accept: 'application/vnd.github+json', 'user-agent': 'LumenSearch/0.1' } })
+    if (!response.ok) throw new Error(`GitHub returned ${response.status}`)
+    const payload = await response.json()
+    return { results: (payload.items || []).map((item) => ({ title: item.full_name, url: item.html_url, content: item.description || 'GitHub repository', engine: 'github', publishedDate: item.updated_at || null })), hasMore: (payload.total_count || 0) > page * maxResults, error: null }
+  } catch (error) { return { results: [], hasMore: false, error: error.message } }
+}
+
 async function searchSearxng(query, depth = 'quick', maxResults = 10, configuredUrl = searxngUrl, category = 'general', page = 1) {
   const safePage = Math.max(1, Math.floor(Number(page) || 1))
   const key = `${configuredUrl}:${query}:${depth}:${maxResults}:${category}:${safePage}`
   const hit = cache.get(key)
   if (hit && Date.now() - hit.createdAt < 300_000) return { ...hit.value, cached: true }
+  if (category === 'github') {
+    const github = await searchGitHubRepositories(query, safePage, maxResults)
+    const value = { provider: 'github', query, depth, page: safePage, pageSize: maxResults, hasMore: github.hasMore, results: github.results, errors: github.error ? [{ query, message: `GitHub repository search: ${github.error}` }] : [], queries: [query], budget: { requested: 1, used: 1 } }
+    cache.set(key, { createdAt: Date.now(), value })
+    return value
+  }
   const results = []
   const errors = []
+  const searchCategory = category
   for (const focusedQuery of queriesFor(query, depth).slice(0, depth === 'deep' ? 3 : 1)) {
     try {
       const url = new URL('/search', safeUrl(configuredUrl))
@@ -84,7 +107,7 @@ async function searchSearxng(query, depth = 'quick', maxResults = 10, configured
       url.searchParams.set('format', 'json')
       url.searchParams.set('safesearch', '1')
       url.searchParams.set('pageno', String(safePage))
-      if (category !== 'general') url.searchParams.set('categories', category)
+      if (searchCategory !== 'general') url.searchParams.set('categories', searchCategory)
       const response = await fetch(url, { signal: AbortSignal.timeout(15_000), headers: { accept: 'application/json' } })
       if (!response.ok) throw new Error(`SearXNG returned ${response.status}`)
       const payload = await response.json()
