@@ -26,7 +26,7 @@ The browser runs on Vite and proxies `/api` to the local orchestration API. The 
 
 SearXNG must allow JSON output and respond at `/search?format=json`. The deep-research route is bounded to three focused queries, deduplicates URLs, caches results for five minutes, AI-ranks the retrieved set, and reads every reachable source page with timeouts before synthesis. Quick scoped search stays snippet-first and does not crawl pages.
 
-For local models, Lumen uses one compact search-intelligence request for the quick-search plan, full-result ranking, match scores, tailored reasons, and AI overview. This prevents queued LM Studio calls from timing out while keeping every AI stage active. Deep research retains its separate read, evidence-check, and synthesis stages.
+For local models, Lumen uses a compact search-intelligence request plus bounded ranking batches for the quick-search plan, full-result ranking, match scores, tailored reasons, and AI overview. It accepts strict JSON, fenced JSON, and conservative numbered-score output from local chat templates. If a model produces a usable overview but only partially formats its ranking, the UI reports **AI-assisted** rather than incorrectly saying LM Studio was unused; only the unranked remainder falls back to deterministic relevance scoring. Deep research retains its separate read, evidence-check, and synthesis stages.
 
 `npm run searxng` starts the bundled SearXNG container on `http://127.0.0.1:8080`. Lumen returns normal web pages, documentation, GitHub repositories, news, and other engine results from SearXNG; it does not restrict retrieval to academic sources.
 

@@ -415,11 +415,32 @@ function sourceOverview(query, results) {
 }
 
 function parseRankingEntries(output) {
-  const match = output.replace(/```json|```/gi, '').match(/\[[\s\S]*\]/)
-  if (!match) throw new Error('Model did not return a ranking list')
-  const entries = JSON.parse(match[0])
-  if (!Array.isArray(entries)) throw new Error('Model ranking was not an array')
-  return entries
+  const cleaned = String(output || '').replace(/```(?:json|markdown)?/gi, '').trim()
+  const arrayMatch = cleaned.match(/\[[\s\S]*\]/)
+  if (arrayMatch) {
+    try {
+      const entries = JSON.parse(arrayMatch[0])
+      if (Array.isArray(entries)) return entries
+    } catch {}
+  }
+  const objectMatch = cleaned.match(/\{[\s\S]*\}/)
+  if (objectMatch) {
+    try {
+      const value = JSON.parse(objectMatch[0])
+      if (Array.isArray(value.ranking)) return value.ranking
+    } catch {}
+  }
+
+  // Some local chat templates prepend a Markdown list despite the JSON
+  // instruction. Only accept an unambiguous "id. score - reason" line.
+  const markdownEntries = []
+  for (const line of cleaned.split('\n')) {
+    const match = line.match(/^\s*(?:[-*]\s*)?(\d+)\s*[.)]\s*(?:score\s*[:=-]?\s*)?(\d{1,3})(?:\s*(?:[-|:—–])\s*(.*))?\s*$/i)
+    if (!match) continue
+    markdownEntries.push({ id: Number(match[1]), score: Number(match[2]), reason: String(match[3] || 'Relevant to the query.').trim() })
+  }
+  if (markdownEntries.length) return markdownEntries
+  throw new Error('Model did not return a usable ranking list')
 }
 
 async function rankEveryResultWithAI(provider, query, results, override = {}) {
@@ -431,12 +452,19 @@ async function rankEveryResultWithAI(provider, query, results, override = {}) {
     const candidates = batch.map((item, index) => `${offset + index + 1}. ${item.title.slice(0, 110)} | ${new URL(item.url).hostname} | ${item.content.replace(/\s+/g, ' ').slice(0, 85)}`).join('\n')
     try {
       const output = await chatCompletion(provider, 'You are Lumen\'s search reranker. Score each supplied website for the exact user query. Return only the requested JSON.', `Query: ${query}\n\nReturn ONLY JSON array with every id exactly once: [{"id":number,"score":0-100,"reason":"max 8 words"}].\n\nCandidates:\n${candidates}`, override, { timeoutMs: 16_000, maxTokens: 240 })
-      entries.push(...parseRankingEntries(output))
+      const rankedBatch = parseRankingEntries(output)
+      const validBatchIds = new Set(rankedBatch.map((item) => Number(item.id)))
+      if (validBatchIds.size !== batch.length || [...validBatchIds].some((id) => id < offset + 1 || id > offset + batch.length)) throw new Error(`AI returned an incomplete ranking batch (${validBatchIds.size}/${batch.length})`)
+      entries.push(...rankedBatch)
     } catch (error) { failures.push(error.message) }
   }
   const uniqueIds = new Set(entries.map((item) => Number(item.id)).filter((id) => id >= 1 && id <= results.length))
-  if (uniqueIds.size !== results.length) throw new Error(failures[0] || `AI ranked ${uniqueIds.size} of ${results.length} results`)
-  return parseCuratedRanking(JSON.stringify(entries), query, results)
+  return {
+    results: parseCuratedRanking(JSON.stringify(entries), query, results),
+    rankedCount: uniqueIds.size,
+    complete: uniqueIds.size === results.length,
+    error: failures[0] || null,
+  }
 }
 
 async function curateResults(provider, query, results, override = {}, plan = null, includeOverview = false) {
@@ -457,12 +485,13 @@ async function curateResults(provider, query, results, override = {}, plan = nul
     } catch (error) {
       overviewError = error.message
     }
-    try {
-      const ranked = await rankEveryResultWithAI(provider, query, results, override)
-      return { results: ranked, mode: 'ai', error: null, overview, plan: planResult }
-    } catch (error) {
-      return { results: heuristicRank(query, results), mode: 'heuristic', error: overviewError || error.message, overview, plan: planResult }
+    const ranked = await rankEveryResultWithAI(provider, query, results, override)
+    if (ranked.complete) return { results: ranked.results, mode: 'ai', error: null, overview, plan: planResult }
+    const modelReturnedOverview = overview !== sourceOverview(query, results)
+    if (ranked.rankedCount || modelReturnedOverview) {
+      return { results: ranked.results, mode: 'partial', error: null, warning: ranked.error || overviewError || `AI ranked ${ranked.rankedCount} of ${results.length} results; remaining results use relevance fallback.`, overview, plan: planResult }
     }
+    return { results: ranked.results, mode: 'heuristic', error: overviewError || ranked.error || 'The model did not return usable search intelligence.', overview, plan: planResult }
   }
   const prompt = `Query: ${query}\nSearch focus: ${plan?.focus || 'directly satisfy the user intent'}\n\nRank every candidate. Prefer direct, trustworthy, useful websites. Return ONLY JSON array: [{"id":number,"score":0-100,"reason":"max 8 words"}]. Every id exactly once.\n\nCandidates:\n${sourceList}`
   try {
