@@ -7,7 +7,7 @@ Lumen is a local-first AI web search and deep-research workspace. It uses SearXN
 - Searches websites rather than only research papers, with Web, News, Images, Videos, GitHub, and Academic scopes.
 - Produces an AI overview with an expand/collapse control, then shows individually ranked website results with a tailored relevance reason.
 - Provides visible pagination: page 2 shows the next result set rather than hiding it below the follow-up composer.
-- Runs deep research by planning bounded queries, AI-ranking every retrieved result, reading every reachable source page, cross-checking evidence, and synthesizing with inline citations.
+- Runs deep research with the selected model as an active agent: it plans a focused web query, ranks every retrieved result, checks extracted evidence for support and disagreement, and synthesizes inline-cited answers.
 - Keeps the search and research surfaces in one graphite dark UI, with a persistent activity/progress strip and a follow-up composer.
 - Lets you choose a provider and model, make it the default for new searches, and persist that default locally across reloads.
 - Uses a GitHub repository-search route for the GitHub tab when SearXNG does not have a usable GitHub engine.
@@ -22,7 +22,7 @@ npm run dev:api
 npm run dev
 ```
 
-The browser runs on Vite and proxies `/api` to the local orchestration API. The API defaults to `127.0.0.1:8787`; set `LUMEN_API_PORT` if another local service already owns that port, and start Vite with the same variable.
+The browser runs on Vite and proxies `/api` to the local orchestration API. The API defaults to `127.0.0.1:3001`; set `LUMEN_API_PORT` if another local service already owns that port, and start Vite with the same variable.
 
 SearXNG must allow JSON output and respond at `/search?format=json`. The deep-research route is bounded to three focused queries, deduplicates URLs, caches results for five minutes, AI-ranks the retrieved set, and reads every reachable source page with timeouts before synthesis. Quick scoped search stays snippet-first and does not crawl pages.
 
@@ -34,7 +34,7 @@ For a production-like local stack, run `docker compose up --build`. Lumen is ser
 
 Remote API keys stay on the server in `.env`; they are never sent to the browser. Provider settings provide model dropdowns for every built-in provider and let you choose the default used for new searches. Saved models and defaults are stored locally in the browser.
 
-LM Studio uses its local OpenAI-compatible endpoint. Lumen discovers its installed models from the local model API, and the Provider settings include a masked **Server API key** field for LM Studio servers with authentication enabled. That token is sent only to the local Lumen API for model discovery and model requests; it is held for the browser session and is never written to localStorage. `LM_API_TOKEN` remains available as a server-side default. Without a token, Lumen keeps working with other providers and displays an actionable local-only message instead of failing the page.
+LM Studio uses its local OpenAI-compatible endpoint. Lumen accepts either a base server URL such as `http://host:1234` or an explicit `/v1` URL, discovers installed models from the local model API, and includes a masked **Server API key** field for servers with authentication enabled. Select a model, then use **Test model connection**; a `Connected · … answered` message proves Lumen sent a real completion to it. The token is sent only to the local Lumen API for model discovery and model requests, is held for the browser session, and is never written to localStorage. `LM_API_TOKEN` remains available as a server-side default. Without a token, Lumen keeps working with other providers and displays an actionable local-only message instead of failing the page.
 
 OAuth status and login routes invoke the configured local CLI (`codex`, `mmx`, or `grok`) and return only install/auth state, following the local-session approach used by [Prediction](https://github.com/Franzferdinan51/Prediction). When a remote provider has an authenticated local session, `/api/research` uses that CLI for synthesis without copying credentials into Lumen or the browser; a configured OpenAI-compatible endpoint remains the fallback.
 

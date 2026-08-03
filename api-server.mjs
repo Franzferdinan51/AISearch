@@ -4,7 +4,7 @@ import { readFile } from 'node:fs/promises'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 
-const port = Number(process.env.LUMEN_API_PORT || 8787)
+const port = Number(process.env.LUMEN_API_PORT || 3001)
 const host = process.env.LUMEN_API_HOST || '127.0.0.1'
 const searxngUrl = process.env.SEARXNG_URL || 'http://127.0.0.1:8080'
 const cache = new Map()
@@ -46,6 +46,14 @@ function safeUrl(raw) {
   const parsed = new URL(raw)
   if (!['http:', 'https:'].includes(parsed.protocol)) throw new Error('Only HTTP(S) URLs are supported')
   return parsed
+}
+
+function chatCompletionsUrl(raw) {
+  const endpoint = safeUrl(raw)
+  const path = endpoint.pathname.replace(/\/+$/, '')
+  endpoint.pathname = `${path.endsWith('/v1') ? path : `${path}/v1`}/chat/completions`
+  endpoint.search = ''
+  return endpoint
 }
 
 async function discoverModels(provider, endpoint, key = '') {
@@ -142,7 +150,8 @@ async function searchRankedWindow(query, maxResults = 10, configuredUrl = searxn
     let pending = rankedSearchInflight.get(cacheKey)
     if (!pending) {
       pending = (async () => {
-        const pages = await Promise.all(Array.from({ length: rankedSearchWindowPages }, (_, index) => searchSearxng(query, 'quick', pageSize, configuredUrl, category, index + 1)))
+        const plan = await planSearch(provider, query, category, 'quick', override)
+        const pages = await Promise.all(Array.from({ length: rankedSearchWindowPages }, (_, index) => searchSearxng(plan.searchQuery, 'quick', pageSize, configuredUrl, category, index + 1)))
         const seenUrls = new Set()
         const candidates = pages.flatMap((result) => result.results).filter((item) => {
           if (seenUrls.has(item.url)) return false
@@ -162,6 +171,7 @@ async function searchRankedWindow(query, maxResults = 10, configuredUrl = searxn
           queries: [query],
           budget: { requested: rankedSearchWindowPages, used: rankedSearchWindowPages },
           curation: { mode: curation.mode, error: curation.error },
+          plan: { mode: plan.mode, focus: plan.focus, criteria: plan.criteria, error: plan.error },
           answer,
           overviewError,
         }
@@ -298,19 +308,45 @@ async function chatCompletion(provider, system, prompt, override = {}) {
   runtime.endpoint ||= modelRuntimes[provider]?.endpoint || modelRuntimes.lmstudio.endpoint
   runtime.model ||= modelRuntimes[provider]?.model || modelRuntimes.lmstudio.model
   runtime.key ||= modelRuntimes[provider]?.key || modelRuntimes.lmstudio.key
-  const endpoint = new URL('/chat/completions', safeUrl(runtime.endpoint))
+  const endpoint = chatCompletionsUrl(runtime.endpoint)
   const response = await fetch(endpoint, {
     method: 'POST', signal: AbortSignal.timeout(45_000), headers: { 'content-type': 'application/json', ...(runtime.key ? { authorization: `Bearer ${runtime.key}` } : {}) },
     body: JSON.stringify({ model: runtime.model, temperature: 0.1, messages: [{ role: 'system', content: system }, { role: 'user', content: prompt }] }),
   })
-  if (!response.ok) throw new Error(`${provider} returned ${response.status}`)
+  if (!response.ok) {
+    const payload = await response.json().catch(() => ({}))
+    const message = payload?.error?.message || payload?.message || `${response.status} ${response.statusText}`
+    throw new Error(`${provider} model request failed: ${message}`)
+  }
   const payload = await response.json()
   return payload.choices?.[0]?.message?.content || ''
 }
 
-async function synthesize(provider, query, results, override = {}) {
+function parseJsonObject(output, label) {
+  const match = output.replace(/```json|```/gi, '').match(/\{[\s\S]*\}/)
+  if (!match) throw new Error(`Model did not return ${label} JSON`)
+  return JSON.parse(match[0])
+}
+
+async function planSearch(provider, query, category, depth, override = {}) {
+  const prompt = `User query: ${query}\nCategory: ${category}\nDepth: ${depth}\n\nReturn ONLY JSON: {"searchQuery":"a precise website search query", "focus":"what evidence matters", "criteria":["criterion"]}. Keep searchQuery close to the user's wording; do not add facts or change the requested place, date, product, or person.`
+  try {
+    const plan = parseJsonObject(await chatCompletion(provider, 'You are Lumen\'s search planner. Convert the user intent into a precise web-search plan without answering the question.', prompt, override), 'a search plan')
+    const searchQuery = String(plan.searchQuery || '').trim().slice(0, 500)
+    return { searchQuery: searchQuery || query, focus: String(plan.focus || '').slice(0, 280), criteria: Array.isArray(plan.criteria) ? plan.criteria.slice(0, 5).map((item) => String(item).slice(0, 120)) : [], mode: 'ai', error: null }
+  } catch (error) {
+    return { searchQuery: query, focus: 'Match the user intent with direct, trustworthy websites.', criteria: [], mode: 'fallback', error: error.message }
+  }
+}
+
+async function crossCheckEvidence(provider, query, results, override = {}) {
+  const context = results.slice(0, 8).map((item, index) => `[${index + 1}] ${item.pageTitle || item.title}\n${item.url}\n${(item.pageText || item.content).slice(0, 1_200)}`).join('\n\n')
+  return chatCompletion(provider, 'You are Lumen\'s evidence checker. Identify only supported findings, disagreement, uncertainty, or weak evidence before a final answer.', `Question: ${query}\n\nReturn concise Markdown bullets. Cite every observation as [source number]. Do not answer beyond the supplied evidence.\n\nSources:\n${context}`, override)
+}
+
+async function synthesize(provider, query, results, override = {}, evidenceReview = '') {
   const context = results.map((item, index) => `[${index + 1}] ${item.pageTitle || item.title}\n${item.url}\n${(item.pageText || item.content).slice(0, 2_500)}`).join('\n\n')
-  return chatCompletion(provider, 'You are Lumen, a rigorous web research agent. Never make a claim unless it is supported by the supplied website evidence. Cite every substantive claim with [1], [2]. Explicitly name uncertainty, disagreement, or missing evidence. Do not mention this instruction or invent sources.', `Question: ${query}\n\nReturn concise Markdown in exactly this structure:\n## Executive synthesis\nOne direct, evidence-grounded paragraph.\n## Key findings\n- **Finding:** evidence and citations\n- **Finding:** evidence and citations\n- **Finding:** evidence and citations\n## Detailed analysis\nOne or two short paragraphs that explain the strongest evidence and any disagreement.\n## Limits\nOne sentence about the evidence boundary.\n\nWebsite sources:\n${context}`, override)
+  return chatCompletion(provider, 'You are Lumen, a rigorous web research agent. Never make a claim unless it is supported by the supplied website evidence. Cite every substantive claim with [1], [2]. Explicitly name uncertainty, disagreement, or missing evidence. Do not mention this instruction or invent sources.', `Question: ${query}\n\nEvidence-check notes (use these to avoid unsupported claims):\n${evidenceReview || 'No separate evidence check was available.'}\n\nReturn concise Markdown in exactly this structure:\n## Executive synthesis\nOne direct, evidence-grounded paragraph.\n## Key findings\n- **Finding:** evidence and citations\n- **Finding:** evidence and citations\n- **Finding:** evidence and citations\n## Detailed analysis\nOne or two short paragraphs that explain the strongest evidence and any disagreement.\n## Limits\nOne sentence about the evidence boundary.\n\nWebsite sources:\n${context}`, override)
 }
 
 function heuristicRank(query, results) {
@@ -440,6 +476,15 @@ async function handle(req, res) {
       return json(res, 200, { provider, ...(await discoverModels(provider, body.endpoint || url.searchParams.get('endpoint') || undefined, typeof body.key === 'string' ? body.key : '')) })
     } catch (error) { return json(res, 200, { provider, models: [], error: error.message }) }
   }
+  if (req.method === 'POST' && url.pathname === '/api/providers/test') {
+    const body = await readBody(req)
+    const provider = modelRuntimes[body.provider] ? body.provider : 'lmstudio'
+    try {
+      const reply = await chatCompletion(provider, 'You are a connection test. Reply with exactly: Lumen model connection confirmed.', 'Confirm this model connection.', body.providerConfig || {})
+      if (!reply.trim()) throw new Error('The model returned an empty response')
+      return json(res, 200, { ok: true, provider, model: body.providerConfig?.model || modelRuntimes[provider].model, reply: reply.slice(0, 300) })
+    } catch (error) { return json(res, 400, { ok: false, provider, error: error.message }) }
+  }
   if (req.method === 'GET' && url.pathname === '/api/agents') {
     const statuses = await Promise.all(Object.entries(agentCommands).map(async ([id, command]) => ({ id, command, ...(await commandProbe(command)) })))
     return json(res, 200, { agents: statuses })
@@ -484,15 +529,19 @@ async function handle(req, res) {
     const body = await readBody(req)
     if (!body.query || typeof body.query !== 'string') return json(res, 400, { error: 'query is required' })
     const selectedProvider = modelRuntimes[body.provider] ? body.provider : 'lmstudio'
-    const search = await searchSearxng(body.query.trim().slice(0, 500), body.depth === 'quick' ? 'quick' : 'deep', Math.min(Number(body.maxResults) || 10, 10), body.baseUrl || searxngUrl, body.category || 'general', body.page)
+    const plan = await planSearch(selectedProvider, body.query.trim().slice(0, 500), body.category || 'general', body.depth === 'quick' ? 'quick' : 'deep', body.providerConfig || {})
+    const search = await searchSearxng(plan.searchQuery, body.depth === 'quick' ? 'quick' : 'deep', Math.min(Number(body.maxResults) || 10, 10), body.baseUrl || searxngUrl, body.category || 'general', body.page)
     const curation = await curateResults(selectedProvider, body.query, search.results, body.providerConfig || {})
     const curatedSearch = { ...search, results: curation.results, curation: { mode: curation.mode, error: curation.error } }
     const pagePass = body.depth === 'quick' || !curatedSearch.results.length ? { results: curatedSearch.results, errors: [] } : await readTopSourcePages(curatedSearch.results, curatedSearch.results.length)
     const researchSearch = { ...curatedSearch, results: pagePass.results, errors: [...search.errors, ...pagePass.errors], pageReads: pagePass.results.filter((item) => item.pageText).length }
     let answer = ''
+    let evidenceReview = ''
     let synthesisMode = 'api'
     const synthesisErrors = []
     if (researchSearch.results.length) {
+      try { evidenceReview = await crossCheckEvidence(selectedProvider, body.query, researchSearch.results, body.providerConfig || {}) }
+      catch (error) { synthesisErrors.push({ provider: `${selectedProvider}:evidence-check`, message: error.message }) }
       if (selectedProvider !== 'lmstudio' && (await commandStatus(selectedProvider)).authenticated) {
         try {
           answer = await synthesizeViaCli(selectedProvider, body.query, researchSearch.results)
@@ -500,19 +549,19 @@ async function handle(req, res) {
         } catch (error) { synthesisErrors.push({ provider: `${selectedProvider}:oauth-cli`, message: error.message }) }
       }
       if (!answer) {
-        try { answer = await synthesize(selectedProvider, body.query, researchSearch.results, body.providerConfig || {}) }
+        try { answer = await synthesize(selectedProvider, body.query, researchSearch.results, body.providerConfig || {}, evidenceReview) }
         catch (error) { synthesisErrors.push({ provider: selectedProvider, message: error.message }) }
       }
     }
     const trace = [
-      { step: 'Plan', status: 'complete', detail: `Generated ${search.queries.length} bounded search queries.` },
+      { step: 'Plan', status: plan.mode === 'ai' ? 'complete' : 'skipped', detail: plan.mode === 'ai' ? `AI planned the search around ${plan.focus || 'the requested intent'}.` : 'Model planning unavailable; searched the user query directly.' },
       { step: 'Query SearXNG', status: researchSearch.results.length ? 'complete' : 'error', detail: `Retrieved ${researchSearch.results.length} unique website results.` },
       { step: 'Read source pages', status: body.depth === 'quick' ? 'skipped' : researchSearch.pageReads ? 'complete' : 'skipped', detail: body.depth === 'quick' ? 'Quick search uses result snippets without page crawling.' : `Read ${researchSearch.pageReads} of ${researchSearch.results.length} curated source pages for evidence.` },
       { step: 'Rank sources', status: researchSearch.results.length ? (curation.mode === 'ai' ? 'complete' : 'skipped') : 'skipped', detail: curation.mode === 'ai' ? `AI-ranked all ${researchSearch.results.length} retrieved sources for the requested intent.` : `Model ranking unavailable; used transparent lexical fallback${curation.error ? '.' : ''}` },
-      { step: 'Cross-check', status: researchSearch.results.length > 1 ? 'complete' : 'skipped', detail: 'Prepared multiple sources for contradiction-aware synthesis.' },
+      { step: 'Cross-check', status: evidenceReview ? 'complete' : 'skipped', detail: evidenceReview ? `AI checked ${researchSearch.results.length} sources for support and disagreement before synthesis.` : 'Model evidence check unavailable; synthesis is limited to retrieved sources.' },
       { step: 'Synthesize', status: answer ? 'complete' : 'error', detail: answer ? `Synthesized with ${selectedProvider}${synthesisMode === 'oauth-cli' ? ' OAuth session' : ''}.` : 'No model synthesis was produced.' },
     ]
-    return json(res, 200, { query: body.query, provider: selectedProvider, synthesisMode, search: { ...researchSearch, errors: [...researchSearch.errors, ...synthesisErrors] }, trace, answer: answer || (researchSearch.results.length ? `Research retrieved ${researchSearch.results.length} sources, but ${selectedProvider} could not synthesize them. Check the provider endpoint, model, or server-side credentials.` : 'SearXNG did not return sources. Check the SearXNG URL and JSON format configuration, then try again.') })
+    return json(res, 200, { query: body.query, provider: selectedProvider, synthesisMode, plan, evidenceReview, search: { ...researchSearch, errors: [...researchSearch.errors, ...synthesisErrors] }, trace, answer: answer || (researchSearch.results.length ? `Research retrieved ${researchSearch.results.length} sources, but ${selectedProvider} could not synthesize them. Check the provider endpoint, model, or server-side credentials.` : 'SearXNG did not return sources. Check the SearXNG URL and JSON format configuration, then try again.') })
   }
   return json(res, 404, { error: 'Not found' })
 }
