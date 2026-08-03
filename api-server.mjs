@@ -414,17 +414,54 @@ function sourceOverview(query, results) {
   return `## Source overview\nHere are the strongest retrieved website results for “${query}”.\n\n${findings.join('\n')}`
 }
 
+function parseRankingEntries(output) {
+  const match = output.replace(/```json|```/gi, '').match(/\[[\s\S]*\]/)
+  if (!match) throw new Error('Model did not return a ranking list')
+  const entries = JSON.parse(match[0])
+  if (!Array.isArray(entries)) throw new Error('Model ranking was not an array')
+  return entries
+}
+
+async function rankEveryResultWithAI(provider, query, results, override = {}) {
+  const entries = []
+  const failures = []
+  const batchSize = 10
+  for (let offset = 0; offset < results.length; offset += batchSize) {
+    const batch = results.slice(offset, offset + batchSize)
+    const candidates = batch.map((item, index) => `${offset + index + 1}. ${item.title.slice(0, 110)} | ${new URL(item.url).hostname} | ${item.content.replace(/\s+/g, ' ').slice(0, 85)}`).join('\n')
+    try {
+      const output = await chatCompletion(provider, 'You are Lumen\'s search reranker. Score each supplied website for the exact user query. Return only the requested JSON.', `Query: ${query}\n\nReturn ONLY JSON array with every id exactly once: [{"id":number,"score":0-100,"reason":"max 8 words"}].\n\nCandidates:\n${candidates}`, override, { timeoutMs: 16_000, maxTokens: 240 })
+      entries.push(...parseRankingEntries(output))
+    } catch (error) { failures.push(error.message) }
+  }
+  const uniqueIds = new Set(entries.map((item) => Number(item.id)).filter((id) => id >= 1 && id <= results.length))
+  if (uniqueIds.size !== results.length) throw new Error(failures[0] || `AI ranked ${uniqueIds.size} of ${results.length} results`)
+  return parseCuratedRanking(JSON.stringify(entries), query, results)
+}
+
 async function curateResults(provider, query, results, override = {}, plan = null, includeOverview = false) {
   if (!results.length) return { results, mode: 'none', error: null }
   const sourceList = results.map((item, index) => `${index + 1}. ${item.title.slice(0, 120)} | ${new URL(item.url).hostname} | ${item.content.replace(/\s+/g, ' ').slice(0, 100)}`).join('\n')
   if (includeOverview && provider === 'lmstudio') {
     const prompt = `Query: ${query}\n\nReturn ONLY JSON: {"plan":{"focus":"short"},"ranking":[{"id":number,"score":0-100,"reason":"max 8 words"}],"overview":"2-4 concise Markdown paragraphs/bullets with [id] citations"}. Select and rank only the 6 strongest candidates. The overview must directly answer the query using only the candidates.\n\nCandidates:\n${sourceList}`
+    let overview = sourceOverview(query, results)
+    let planResult = null
+    let overviewError = null
     try {
       const output = await chatCompletion(provider, 'You are Lumen\'s compact search intelligence engine. Prioritize a useful, cited overview and select only the strongest sources.', prompt, override, { timeoutMs: 35_000, maxTokens: 560 })
-      try { return { ...parseSearchIntelligence(output, query, results), mode: 'ai', error: null } }
-      catch (error) { return { results: heuristicRank(query, results), mode: 'heuristic', error: `AI returned an incomplete ranking: ${error.message}`, overview: salvageOverview(output) || sourceOverview(query, results), plan: null } }
+      try {
+        const intelligence = parseSearchIntelligence(output, query, results)
+        overview = intelligence.overview || overview
+        planResult = intelligence.plan
+      } catch (error) { overview = salvageOverview(output) || overview; overviewError = `AI returned an incomplete overview: ${error.message}` }
     } catch (error) {
-      return { results: heuristicRank(query, results), mode: 'heuristic', error: error.message, overview: sourceOverview(query, results), plan: null }
+      overviewError = error.message
+    }
+    try {
+      const ranked = await rankEveryResultWithAI(provider, query, results, override)
+      return { results: ranked, mode: 'ai', error: null, overview, plan: planResult }
+    } catch (error) {
+      return { results: heuristicRank(query, results), mode: 'heuristic', error: overviewError || error.message, overview, plan: planResult }
     }
   }
   const prompt = `Query: ${query}\nSearch focus: ${plan?.focus || 'directly satisfy the user intent'}\n\nRank every candidate. Prefer direct, trustworthy, useful websites. Return ONLY JSON array: [{"id":number,"score":0-100,"reason":"max 8 words"}]. Every id exactly once.\n\nCandidates:\n${sourceList}`
