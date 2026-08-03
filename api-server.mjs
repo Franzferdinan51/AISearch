@@ -49,8 +49,9 @@ function queriesFor(query, depth) {
   return [query, `${query} technical report`, `${query} latest developments`]
 }
 
-async function searchSearxng(query, depth = 'quick', maxResults = 8, configuredUrl = searxngUrl, category = 'general') {
-  const key = `${configuredUrl}:${query}:${depth}:${maxResults}:${category}`
+async function searchSearxng(query, depth = 'quick', maxResults = 10, configuredUrl = searxngUrl, category = 'general', page = 1) {
+  const safePage = Math.max(1, Math.floor(Number(page) || 1))
+  const key = `${configuredUrl}:${query}:${depth}:${maxResults}:${category}:${safePage}`
   const hit = cache.get(key)
   if (hit && Date.now() - hit.createdAt < 300_000) return { ...hit.value, cached: true }
   const results = []
@@ -61,6 +62,7 @@ async function searchSearxng(query, depth = 'quick', maxResults = 8, configuredU
       url.searchParams.set('q', focusedQuery)
       url.searchParams.set('format', 'json')
       url.searchParams.set('safesearch', '1')
+      url.searchParams.set('pageno', String(safePage))
       if (category !== 'general') url.searchParams.set('categories', category)
       const response = await fetch(url, { signal: AbortSignal.timeout(15_000), headers: { accept: 'application/json' } })
       if (!response.ok) throw new Error(`SearXNG returned ${response.status}`)
@@ -73,7 +75,7 @@ async function searchSearxng(query, depth = 'quick', maxResults = 8, configuredU
     } catch (error) { errors.push({ query: focusedQuery, message: error.message }) }
     if (results.length >= maxResults) break
   }
-  const value = { provider: 'searxng', query, depth, results: results.slice(0, maxResults), errors, queries: queriesFor(query, depth), budget: { requested: depth === 'deep' ? 3 : 1, used: queriesFor(query, depth).length } }
+  const value = { provider: 'searxng', query, depth, page: safePage, pageSize: maxResults, hasMore: results.length >= maxResults, results: results.slice(0, maxResults), errors, queries: queriesFor(query, depth), budget: { requested: depth === 'deep' ? 3 : 1, used: queriesFor(query, depth).length } }
   cache.set(key, { createdAt: Date.now(), value })
   return value
 }
@@ -280,13 +282,13 @@ async function handle(req, res) {
   if (req.method === 'POST' && url.pathname === '/api/search') {
     const body = await readBody(req)
     if (!body.query || typeof body.query !== 'string') return json(res, 400, { error: 'query is required' })
-    return json(res, 200, await searchSearxng(body.query.trim().slice(0, 500), body.depth === 'deep' ? 'deep' : 'quick', Math.min(Number(body.maxResults) || 8, 10), body.baseUrl || searxngUrl, body.category || 'general'))
+    return json(res, 200, await searchSearxng(body.query.trim().slice(0, 500), body.depth === 'deep' ? 'deep' : 'quick', Math.min(Number(body.maxResults) || 10, 10), body.baseUrl || searxngUrl, body.category || 'general', body.page))
   }
   if (req.method === 'POST' && url.pathname === '/api/research') {
     const body = await readBody(req)
     if (!body.query || typeof body.query !== 'string') return json(res, 400, { error: 'query is required' })
     const selectedProvider = modelRuntimes[body.provider] ? body.provider : 'lmstudio'
-    const search = await searchSearxng(body.query.trim().slice(0, 500), body.depth === 'quick' ? 'quick' : 'deep', Math.min(Number(body.maxResults) || 8, 10), body.baseUrl || searxngUrl, body.category || 'general')
+    const search = await searchSearxng(body.query.trim().slice(0, 500), body.depth === 'quick' ? 'quick' : 'deep', Math.min(Number(body.maxResults) || 10, 10), body.baseUrl || searxngUrl, body.category || 'general', body.page)
     const pagePass = body.depth === 'quick' || !search.results.length ? { results: search.results, errors: [] } : await readTopSourcePages(search.results)
     const researchSearch = { ...search, results: pagePass.results, errors: [...search.errors, ...pagePass.errors], pageReads: pagePass.results.filter((item) => item.pageText).length }
     let answer = ''

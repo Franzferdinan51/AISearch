@@ -40,6 +40,14 @@ const initialSources: SearchSource[] = [
   { n: '3', title: 'Vane — AI-powered answering engine', domain: 'github.com/ItzCrazyKns/Vane', date: 'Web result', url: 'https://github.com/ItzCrazyKns/Vane', snippet: 'Self-hosted answering engine combining SearXNG retrieval with local and hosted language models.' },
 ]
 
+function normalizeSources(results: Array<{ title: string; url: string; content?: string; publishedDate?: string }>, page = 1): SearchSource[] {
+  return results.flatMap((item, index) => {
+    try {
+      return [{ n: String((page - 1) * 10 + index + 1), title: item.title, domain: new URL(item.url).hostname, date: item.publishedDate || 'Retrieved just now', url: item.url, snippet: item.content }]
+    } catch { return [] }
+  })
+}
+
 function App() {
   const [view, setView] = useState<'search' | 'research' | 'library' | 'providers'>('search')
   const [mode, setMode] = useState<Mode>('Web search')
@@ -52,6 +60,8 @@ function App() {
   const [input, setInput] = useState('')
   const [running, setRunning] = useState(false)
   const [step, setStep] = useState(4)
+  const [resultsPage, setResultsPage] = useState(1)
+  const [hasMoreResults, setHasMoreResults] = useState(true)
   const [sourceList, setSourceList] = useState<SearchSource[]>(initialSources)
   const [answer, setAnswer] = useState('Open-source AI search in 2026 is moving from classical retrieval pipelines to agentic, tool-using systems. Projects are converging on standardized retrieval interfaces, richer grounding signals, and modular agents that can plan, retrieve, verify, and iterate across multiple sources with auditable traces [1][2].')
   const [history, setHistory] = useState<SearchSession[]>(() => { try { return JSON.parse(localStorage.getItem('lumen-history') || '[]') } catch { return [] } })
@@ -95,17 +105,19 @@ function App() {
     setQuery(nextQuery)
     setRunning(true)
     setStep(0)
+    setResultsPage(1)
     setApiError('')
     let current = 0
     const timer = window.setInterval(() => { current += 1; setStep(Math.min(current, 5)); if (current >= 5) window.clearInterval(timer) }, 600)
     try {
       const isDeep = mode === 'Deep research' || mode === 'Explore' || view === 'research'
       const endpoint = '/api/research'
-      const response = await fetch(endpoint, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ query: nextQuery, provider: selectedProvider, providerConfig: { endpoint: provider.endpoint, model: provider.model }, baseUrl: searchEndpoint, category: nextCategory, depth: isDeep ? 'deep' : 'quick', maxResults: 8 }) })
+      const response = await fetch(endpoint, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ query: nextQuery, provider: selectedProvider, providerConfig: { endpoint: provider.endpoint, model: provider.model }, baseUrl: searchEndpoint, category: nextCategory, depth: isDeep ? 'deep' : 'quick', maxResults: 10, page: 1 }) })
       const payload = await response.json()
       if (!response.ok) throw new Error(payload.error || 'Research request failed')
-      const normalized = (payload.search?.results || payload.results || []).map((item: { title: string; url: string; content?: string; publishedDate?: string }, index: number) => ({ n: String(index + 1), title: item.title, domain: new URL(item.url).hostname, date: item.publishedDate || 'Retrieved just now', url: item.url, snippet: item.content }))
+      const normalized = normalizeSources(payload.search?.results || payload.results || [], 1)
       if (normalized.length) setSourceList(normalized)
+      setHasMoreResults(Boolean(payload.search?.hasMore ?? payload.hasMore))
       setAnswer(payload.answer || 'Research completed.')
       if (payload.trace) setTraceSteps(payload.trace)
       if (normalized.length) setHistory((current) => [{ id: crypto.randomUUID(), query: nextQuery, createdAt: new Date().toISOString(), sources: normalized, answer: payload.answer || '' }, ...current.filter((item) => item.query !== nextQuery)].slice(0, 20))
@@ -116,6 +128,23 @@ function App() {
       window.clearInterval(timer)
       setRunning(false)
     }
+  }
+
+  const loadResultsPage = async (page: number) => {
+    if (page < 1 || running || (page > resultsPage && !hasMoreResults)) return
+    setRunning(true)
+    setApiError('')
+    try {
+      const response = await fetch('/api/search', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ query, baseUrl: searchEndpoint, category: searchCategory, depth: 'quick', maxResults: 10, page }) })
+      const payload = await response.json()
+      if (!response.ok) throw new Error(payload.error || 'Search results request failed')
+      setSourceList(normalizeSources(payload.results || [], page))
+      setResultsPage(page)
+      setHasMoreResults(Boolean(payload.hasMore))
+      document.querySelector('.results-scroller')?.scrollTo({ top: 0, behavior: 'smooth' })
+    } catch (error) {
+      setApiError(error instanceof Error ? error.message : 'Could not load this page of results')
+    } finally { setRunning(false) }
   }
 
   const connectProvider = async (id: string) => {
@@ -153,7 +182,7 @@ function App() {
   }
 
   const answerTitle = useMemo(() => query || 'Start a new research thread', [query])
-  const openHistory = (session: SearchSession) => { setQuery(session.query); setSourceList(session.sources); setAnswer(session.answer); setView('search') }
+  const openHistory = (session: SearchSession) => { setQuery(session.query); setSourceList(session.sources); setAnswer(session.answer); setResultsPage(1); setHasMoreResults(true); setView('search') }
 
   return (
     <div className="app-shell">
@@ -196,9 +225,7 @@ function App() {
               <div className="canvas-inner">
                 <div className="eyebrow-row"><span className="eyebrow"><Activity size={13} /> {running ? 'Researching' : 'Research complete'}</span><button className="quiet-button"><Link2 size={14} /> Share</button></div>
                 <h1>{answerTitle}</h1>
-                {view === 'research' ? <><h2>Synthesis</h2><p>{answer}</p><TracePanel compact running={running} step={step} trace={traceSteps} /><p>SearXNG continues to evolve as a privacy-first metasearch backbone, adding improved engine adapters, query transformations, and local ranking plugins. Lumen keeps the retrieval layer separate so you can inspect the web evidence before asking a model to synthesize it <cite>[1][3]</cite>.</p><p>Agentic research adds planning, source ranking, contradiction checks, and explainability on top of ordinary web search—so the agent can justify an answer instead of hiding the trail <cite>[2][3]</cite>.</p><div className="sources-heading"><span>Research sources</span><span className="source-count">{sourceList.length} websites</span></div></> : <><div className="search-overview"><div><Sparkles size={15} /> AI overview</div><p>{answer}</p></div><TracePanel compact running={running} step={step} trace={traceSteps} /><div className="search-filters" role="tablist" aria-label="Search scope">{([['general', 'Web'], ['news', 'News'], ['science', 'Academic']] as const).map(([value, label]) => <button key={value} className={searchCategory === value ? 'selected' : ''} onClick={() => { setSearchCategory(value); runResearch(query, value) }} role="tab" aria-selected={searchCategory === value}>{label}</button>)}</div><div className="sources-heading"><span>Search results</span><span className="source-count">{sourceList.length} websites</span></div></>}
-                {apiError && <div className="research-error"><CircleHelp size={15} /> {apiError}</div>}
-                <div className="source-list">{sourceList.map((source) => <SourceRow key={source.n} source={source} />)}</div>
+                {view === 'research' ? <><h2>Synthesis</h2><p>{answer}</p><TracePanel compact running={running} step={step} trace={traceSteps} /><p>SearXNG continues to evolve as a privacy-first metasearch backbone, adding improved engine adapters, query transformations, and local ranking plugins. Lumen keeps the retrieval layer separate so you can inspect the web evidence before asking a model to synthesize it <cite>[1][3]</cite>.</p><p>Agentic research adds planning, source ranking, contradiction checks, and explainability on top of ordinary web search—so the agent can justify an answer instead of hiding the trail <cite>[2][3]</cite>.</p><div className="sources-heading"><span>Research sources</span><span className="source-count">{sourceList.length} websites</span></div>{apiError && <div className="research-error"><CircleHelp size={15} /> {apiError}</div>}<div className="source-list">{sourceList.map((source) => <SourceRow key={source.n} source={source} />)}</div></> : <><div className="search-overview"><div><Sparkles size={15} /> AI overview</div><p>{answer}</p></div><TracePanel compact running={running} step={step} trace={traceSteps} /><div className="search-filters" role="tablist" aria-label="Search scope">{([['general', 'Web'], ['news', 'News'], ['science', 'Academic']] as const).map(([value, label]) => <button key={value} className={searchCategory === value ? 'selected' : ''} onClick={() => { setSearchCategory(value); runResearch(query, value) }} role="tab" aria-selected={searchCategory === value}>{label}</button>)}</div><div className="results-scroller"><div className="sources-heading"><span>Search results</span><span className="source-count">Page {resultsPage} · {sourceList.length} websites</span></div>{apiError && <div className="research-error"><CircleHelp size={15} /> {apiError}</div>}<div className="source-list">{sourceList.map((source) => <SourceRow key={source.n} source={source} />)}</div><nav className="pagination" aria-label="Search result pages"><button disabled={resultsPage === 1 || running} onClick={() => loadResultsPage(resultsPage - 1)}>Previous</button>{[resultsPage - 1, resultsPage, resultsPage + 1].filter((page) => page > 0 && (page <= resultsPage || hasMoreResults)).map((page) => <button key={page} className={page === resultsPage ? 'active' : ''} disabled={running} onClick={() => loadResultsPage(page)} aria-current={page === resultsPage ? 'page' : undefined}>{page}</button>)}<button disabled={!hasMoreResults || running} onClick={() => loadResultsPage(resultsPage + 1)}>Next</button></nav></div></>}
               </div>
             </section>
           </div>
