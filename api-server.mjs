@@ -126,7 +126,11 @@ async function searchSearxng(query, depth = 'quick', maxResults = 10, configured
       const payload = await response.json()
       for (const result of Array.isArray(payload.results) ? payload.results : []) {
         if (!result.url || results.some((item) => item.url === result.url)) continue
-        results.push({ title: result.title || 'Untitled result', url: result.url, content: result.content || '', engine: result.engine || 'SearXNG', publishedDate: result.publishedDate || null })
+        results.push({
+          title: result.title || 'Untitled result', url: result.url, content: result.content || '', engine: result.engine || 'SearXNG', publishedDate: result.publishedDate || result.pubdate || null,
+          category: result.category || category, template: result.template || '', thumbnail: result.thumbnail || result.thumbnail_src || '', imgSrc: result.img_src || '', iframeSrc: result.iframe_src || '',
+          source: result.source || '', resolution: result.resolution || '', length: result.length || '', author: result.author || '', metadata: result.metadata || '',
+        })
         if (results.length >= maxResults) break
       }
     } catch (error) { errors.push({ query: focusedQuery, message: error.message }) }
