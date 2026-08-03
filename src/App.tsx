@@ -268,8 +268,11 @@ function App() {
       setRuntimeStages(payload.stages || payload.search?.stages || [])
       const diagnostics = payload.diagnostics || payload.search?.diagnostics || []
       const curationError = payload.search?.curation?.error || payload.curation?.error
+      const retrievalErrors = payload.search?.errors || payload.errors || []
       if (diagnostics.length) setApiError(`AI diagnostics · ${diagnostics[0].provider || provider.name} ${diagnostics[0].stage || 'request'}: ${diagnostics[0].message}`)
-      else if (curationError && !normalized.length) setApiError(`${selectedProvider === 'lmstudio' ? 'Local model' : provider.name} could not curate this empty result set: ${curationError}`)
+      else if (!normalized.length && retrievalErrors.length) setApiError(`No results were retrieved: ${retrievalErrors[0].message}`)
+      else if (!normalized.length) setApiError('No results were retrieved. Try a more specific query or another search category.')
+      else if (curationError) setApiError(`Results are shown with relevance fallback: ${curationError}`)
       setAnswer(payload.answer || (nextCategory === 'news' ? `Latest news results for “${nextQuery}”.` : nextCategory === 'images' ? `Image results for “${nextQuery}”.` : nextCategory === 'videos' ? `Video results for “${nextQuery}”.` : nextCategory === 'github' ? `GitHub repositories for “${nextQuery}”.` : nextCategory === 'science' ? `Academic and technical results for “${nextQuery}”.` : `Found ${normalized.length} ${payload.curation?.mode === 'ai' ? 'AI-curated' : 'relevance-ranked'} web results for “${nextQuery}”. Review the overview and sources below, or switch to Deep research for a cited synthesis.`))
       if (payload.trace) setTraceSteps(payload.trace); else setTraceSteps([])
       if (normalized.length) setHistory((current) => [{ id: crypto.randomUUID(), query: nextQuery, createdAt: new Date().toISOString(), sources: normalized, answer: payload.answer || '' }, ...current.filter((item) => item.query !== nextQuery)].slice(0, 20))

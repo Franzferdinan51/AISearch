@@ -285,7 +285,12 @@ async function searchRankedWindow(query, maxResults = 10, configuredUrl = searxn
         } catch (error) {
           curation = { results: heuristicRank(query, candidates), mode: 'heuristic', error: error.message, overview: '', plan: null, diagnostics: [{ provider, stage: 'curation', message: error.message, severity: 'error' }] }
         }
-        if (!Array.isArray(curation.results) || !curation.results.length) curation = { ...curation, results: heuristicRank(query, candidates), mode: 'heuristic', error: curation.error || 'AI response did not include usable rankings.' }
+        // An empty retrieval set is not an AI ranking failure. Preserve the
+        // SearXNG/GitHub error so the client can explain what actually needs
+        // attention, rather than blaming the selected model.
+        if (candidates.length && (!Array.isArray(curation.results) || !curation.results.length)) {
+          curation = { ...curation, results: heuristicRank(query, candidates), mode: 'heuristic', error: curation.error || 'AI response did not include usable rankings.' }
+        }
         const answer = curation.overview || ''
         const overviewError = includeOverview && !answer ? curation.error : null
         const plan = curation.plan || { mode: 'fallback', focus: 'Match the user intent with direct, trustworthy websites.', criteria: [], error: curation.error || null }
