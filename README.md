@@ -44,6 +44,29 @@ The bridge follows the installed CLI contracts: `codex login`, `mmx auth login`,
 
 The **Settings** page is separate from **Providers**. It saves browser-local preferences for the default new-search mode, compact or comfortable result density, preloading ranked result tabs, and whether AI Overviews appear in general web searches. The page also links to Provider management and can clear the local search library.
 
+## MCP and WebMCP
+
+Lumen exposes two agent-facing search interfaces:
+
+- A standard **stdio MCP server** with `search_web` (website, news, image, video, GitHub, and academic search) and `search_status` tools. Start Lumen first, then run `npm run mcp`. Set `LUMEN_API_URL` only when the API is not at `http://127.0.0.1:3001`.
+- Browser-native **WebMCP** registration via `document.modelContext`, when supported by the browser. Its `search_lumen_web` tool returns website results from the current Lumen instance while keeping the browser page and user in the loop.
+
+Example MCP client configuration:
+
+```json
+{
+  "mcpServers": {
+    "lumen-search": {
+      "command": "node",
+      "args": ["/absolute/path/to/AISearch/mcp-server.mjs"],
+      "env": { "LUMEN_API_URL": "http://127.0.0.1:3001" }
+    }
+  }
+}
+```
+
+Provider dropdowns use a live account catalog whenever **Refresh available models** can authenticate to the provider’s `/v1/models` endpoint. Enter an optional account API key for that provider (or configure its server-side environment key) to load every model available to that account. LM Studio is treated the same way: its dropdown is populated only from its local server’s reported language models, including any locally installed model IDs.
+
 Useful API routes:
 
 - `GET /api/health`

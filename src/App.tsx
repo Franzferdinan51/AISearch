@@ -32,10 +32,13 @@ type ModelOption = { id: string; label: string; architecture?: string | null; qu
 type Preferences = { defaultMode: Mode; warmTabs: boolean; showOverview: boolean; resultDensity: 'comfortable' | 'compact' }
 
 const providerModelSuggestions: Record<string, ModelOption[]> = {
-  openai: [{ id: 'gpt-5', label: 'GPT-5' }, { id: 'gpt-5-mini', label: 'GPT-5 mini' }, { id: 'gpt-4.1', label: 'GPT-4.1' }, { id: 'o4-mini', label: 'o4-mini' }],
-  minimax: [{ id: 'MiniMax-M2.7', label: 'MiniMax M2.7' }, { id: 'MiniMax-M2.5', label: 'MiniMax M2.5' }, { id: 'MiniMax-Text-01', label: 'MiniMax Text 01' }],
-  grok: [{ id: 'grok-4.5', label: 'Grok 4.5' }, { id: 'grok-4', label: 'Grok 4' }, { id: 'grok-3-mini', label: 'Grok 3 mini' }],
+  openai: [{ id: 'gpt-5.6-sol', label: 'GPT-5.6 Sol' }, { id: 'gpt-5.6-terra', label: 'GPT-5.6 Terra' }, { id: 'gpt-5.6-luna', label: 'GPT-5.6 Luna' }, { id: 'gpt-5.6', label: 'GPT-5.6 (latest alias)' }],
+  minimax: [{ id: 'MiniMax-M2.7', label: 'MiniMax M2.7' }, { id: 'MiniMax-M2.7-highspeed', label: 'MiniMax M2.7 Highspeed' }, { id: 'MiniMax-M2.5', label: 'MiniMax M2.5' }, { id: 'MiniMax-M2.5-highspeed', label: 'MiniMax M2.5 Highspeed' }, { id: 'MiniMax-M2.1', label: 'MiniMax M2.1' }, { id: 'MiniMax-M2.1-highspeed', label: 'MiniMax M2.1 Highspeed' }, { id: 'MiniMax-M2', label: 'MiniMax M2' }, { id: 'M2-her', label: 'MiniMax M2-her' }],
+  grok: [{ id: 'grok-4.5', label: 'Grok 4.5' }, { id: 'grok-4.5-latest', label: 'Grok 4.5 (latest alias)' }],
 }
+
+type WebMCPTool = { name: string; description: string; inputSchema: Record<string, unknown>; execute: (args: Record<string, unknown>) => Promise<unknown> }
+type WebMCPContext = { registerTool: (tool: WebMCPTool, options?: { signal?: AbortSignal }) => Promise<unknown> }
 
 const initialProviders: Provider[] = [
   { id: 'lmstudio', name: 'LM Studio', model: 'Qwen 3 30B', endpoint: 'http://localhost:1234/v1', kind: 'Local', connected: true, color: '#7b6af0' },
@@ -153,6 +156,24 @@ function App() {
   }
 
   useEffect(() => { discoverProviderModels('lmstudio') }, [])
+
+  useEffect(() => {
+    const modelContext = (document as Document & { modelContext?: WebMCPContext }).modelContext
+    if (!modelContext) return
+    const controller = new AbortController()
+    void modelContext.registerTool({
+      name: 'search_lumen_web',
+      description: 'Search the web through Lumen and return ranked website results from SearXNG. Use this for websites, news, images, videos, GitHub, or academic sources.',
+      inputSchema: { type: 'object', properties: { query: { type: 'string', description: 'The search query.' }, category: { type: 'string', enum: ['general', 'news', 'images', 'videos', 'github', 'science'], description: 'Optional result category.' }, maxResults: { type: 'number', minimum: 1, maximum: 10, description: 'Number of results to return.' } }, required: ['query'] },
+      async execute(args) {
+        const response = await fetch('/api/search', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ query: String(args.query || '').slice(0, 500), category: args.category || 'general', maxResults: Math.min(Math.max(Number(args.maxResults) || 10, 1), 10), curate: false, includeOverview: false, baseUrl: searchEndpoint }) })
+        const payload = await response.json()
+        if (!response.ok) throw new Error(payload.error || 'Lumen search failed')
+        return { content: [{ type: 'text', text: JSON.stringify({ query: payload.query, category: payload.category, results: (payload.results || []).map((item: { title: string; url: string; content?: string; publishedDate?: string }) => ({ title: item.title, url: item.url, snippet: item.content || '', publishedDate: item.publishedDate || null })) }) }] }
+      },
+    }, { signal: controller.signal }).catch(() => {})
+    return () => controller.abort()
+  }, [searchEndpoint])
 
   const warmSearchTabs = (nextQuery: string) => {
     void fetch('/api/search/warm', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ query: nextQuery, baseUrl: searchEndpoint, maxResults: 10, provider: selectedProvider, providerConfig: { endpoint: provider.endpoint, model: provider.model, key: provider.apiKey } }) }).catch(() => {})
@@ -439,10 +460,10 @@ function SettingsView({ preferences, onUpdate, onReset, onClearHistory, onOpenPr
         return <div className={`provider-card ${selected === provider.id ? 'selected' : ''}`} key={provider.id}>
           <div className="provider-card-top"><ProviderIcon provider={provider} /><span className="provider-kind">{selected === provider.id ? 'Active for search' : provider.kind}</span></div>
           <h2>{provider.name}</h2>
-          <p>{provider.id === 'lmstudio' ? 'Choose from models available on your local LM Studio server.' : `OAuth session for ${provider.name} models.`}</p>
+          <p>{provider.id === 'lmstudio' ? 'The dropdown is populated by the language models installed on your local LM Studio server.' : `Refresh to load every model available to your ${provider.name} account; OAuth remains available for synthesis.`}</p>
           <div className="provider-field"><small>Endpoint</small><input className="provider-edit" aria-label={`${provider.name} endpoint`} value={provider.endpoint} onChange={(event) => onUpdateProvider(provider.id, 'endpoint', event.target.value)} /></div>
           <div className="provider-field provider-model-field"><small>{selected === provider.id ? 'Default model' : 'Saved model'}</small><select className="provider-model-select" aria-label={`${provider.name} model`} value={provider.model} onChange={(event) => onUpdateProvider(provider.id, 'model', event.target.value)}>{currentMissing && <option value={provider.model}>{provider.model} (current)</option>}{models.map((model) => <option key={model.id} value={model.id}>{model.label}{model.quantization ? ` · ${model.quantization}` : ''}</option>)}</select></div>
-          {provider.id === 'lmstudio' && <div className="provider-field provider-key-field"><label htmlFor="lmstudio-api-key">Server API key</label><input id="lmstudio-api-key" className="provider-edit" aria-label="LM Studio API key" type="password" autoComplete="off" value={provider.apiKey || ''} placeholder="Optional LM Studio server token" onChange={(event) => onUpdateProvider(provider.id, 'apiKey', event.target.value)} /></div>}
+          <div className="provider-field provider-key-field"><label htmlFor={`${provider.id}-api-key`}>{provider.id === 'lmstudio' ? 'Server API key' : 'Account API key'}</label><input id={`${provider.id}-api-key`} className="provider-edit" aria-label={`${provider.name} API key`} type="password" autoComplete="off" value={provider.apiKey || ''} placeholder={provider.id === 'lmstudio' ? 'Optional LM Studio server token' : 'Optional — enables the live model catalog'} onChange={(event) => onUpdateProvider(provider.id, 'apiKey', event.target.value)} /></div>
           <div className="model-discovery"><button className="model-refresh" type="button" onClick={() => onDiscoverModels(provider.id)}><RefreshCw size={14} /> {provider.id === 'lmstudio' ? 'Refresh installed models' : 'Refresh available models'}</button>{modelStatus[provider.id] && <small className={modelStatus[provider.id].startsWith('Could not') ? 'model-status error' : 'model-status'}>{modelStatus[provider.id]}</small>}</div>
           <button className={`use-provider-button ${selected === provider.id ? 'active' : ''}`} onClick={() => onSelect(provider.id)}>{selected === provider.id ? <><Check size={15} /> Default for new searches</> : 'Make default for new searches'}</button>
           {provider.id !== 'lmstudio' && <button className={`connect-button ${provider.connected ? 'connected-button' : ''}`} onClick={() => provider.connected ? onCheck(provider.id) : provider.authPending ? onCheck(provider.id) : onConnect(provider.id)}>{provider.connected ? <><Check size={15} /> OAuth connected</> : provider.authPending ? <>Check OAuth session <Settings size={14} /></> : <>Connect with OAuth <ArrowUpRight size={15} /></>}</button>}

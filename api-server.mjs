@@ -52,7 +52,7 @@ async function discoverModels(provider, endpoint, key = '') {
   const configured = safeUrl(endpoint || modelRuntimes[provider]?.endpoint || modelRuntimes.lmstudio.endpoint)
   const providerKey = key || modelRuntimes[provider]?.key
   const headers = { accept: 'application/json', ...(providerKey ? { authorization: `Bearer ${providerKey}` } : {}) }
-  const paths = provider === 'lmstudio' ? ['/api/v1/models', '/v1/models'] : ['/models']
+  const paths = provider === 'lmstudio' ? ['/api/v1/models', '/v1/models', '/models'] : ['/models']
   const errors = []
   for (const pathname of paths) {
     try {
@@ -61,7 +61,7 @@ async function discoverModels(provider, endpoint, key = '') {
       if (!response.ok) throw new Error(`${response.status} ${response.statusText}`)
       const payload = await response.json()
       const candidates = Array.isArray(payload.models) ? payload.models : Array.isArray(payload.data) ? payload.data : []
-      const models = candidates.filter((item) => !item.type || item.type === 'llm').map((item) => ({ id: item.key || item.id || item.model_id || item.display_name, label: item.display_name || item.name || item.key || item.id, architecture: item.architecture || null, quantization: item.quantization?.name || item.quantization || null })).filter((item) => item.id)
+      const models = candidates.filter((item) => !item.type || ['llm', 'language', 'text-generation'].includes(String(item.type).toLowerCase())).map((item) => ({ id: item.key || item.id || item.model_id || item.display_name, label: item.display_name || item.name || item.key || item.id, architecture: item.architecture || null, quantization: item.quantization?.name || item.quantization || null })).filter((item) => item.id)
       return { models, endpoint: url.toString(), source: pathname }
     } catch (error) { errors.push(error.message) }
   }

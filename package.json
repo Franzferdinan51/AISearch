@@ -8,16 +8,19 @@
     "dev:api": "node api-server.mjs",
     "searxng": "docker compose up searxng",
     "start": "node api-server.mjs",
+    "mcp": "node mcp-server.mjs",
     "build": "tsc -p tsconfig.app.json --noEmit && vite build",
     "preview": "vite preview"
   },
   "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.30.0",
     "@vitejs/plugin-react": "5.1.1",
     "lucide-react": "latest",
     "react": "latest",
     "react-dom": "latest",
     "typescript": "5.9.3",
-    "vite": "7.2.0"
+    "vite": "7.2.0",
+    "zod": "^4.4.3"
   },
   "devDependencies": {
     "@types/react": "^19.2.18",
