@@ -113,6 +113,8 @@ function App() {
   const [mobileNav, setMobileNav] = useState(false)
 
   const provider = providers.find((item) => item.id === selectedProvider) ?? providers[0]
+  const activeModelOptions = availableModels[provider.id]?.length ? availableModels[provider.id] : providerModelSuggestions[provider.id] || []
+  const activeModelMissing = !activeModelOptions.some((item) => item.id === provider.model)
   const isEmptySearch = view === 'search' && !query && !running && sourceList.length === 0
   const isEmptyResearch = view === 'research' && !query && !running && sourceList.length === 0
 
@@ -336,9 +338,10 @@ function App() {
           </div>
           <div className="topbar-actions">
             <div className="select-wrap provider-select">
-              <button className="select-button" onClick={() => setShowProvider(!showProvider)}><ProviderIcon provider={provider} />{provider.name} <span className="muted-dot">•</span>{provider.model}<ChevronDown size={16} /></button>
+              <button className="select-button provider-button" onClick={() => setShowProvider(!showProvider)}><ProviderIcon provider={provider} />{provider.name}<ChevronDown size={16} /></button>
               {showProvider && <Dropdown custom items={providers.map((item) => `${item.name} • ${item.model}`)} onSelect={(item) => { const found = providers.find((p) => `${p.name} • ${p.model}` === item); if (found) setSelectedProvider(found.id); setShowProvider(false) }} />}
             </div>
+            <label className="topbar-model-picker"><span>Model</span><select aria-label="Active search model" value={provider.model} onChange={(event) => updateProvider(provider.id, 'model', event.target.value)}>{activeModelMissing && <option value={provider.model}>{provider.model} (current)</option>}{activeModelOptions.map((item) => <option key={item.id} value={item.id}>{item.label}</option>)}</select></label>
             <button className="icon-button gear" onClick={() => setView('settings')} aria-label="Settings"><Settings size={18} /></button>
             <button className="avatar-button" aria-label="Account">AV <ChevronDown size={14} /></button>
           </div>
@@ -426,7 +429,7 @@ function SearchOverview({ answer, sources, expanded, onToggle }: { answer: strin
     const heading = lines[0].replace(/^##\s+/, '')
     return <section key={`${heading}-${index}`}><h3>{heading}</h3>{lines.slice(1).map((line, lineIndex) => <p className={line.startsWith('- ') ? 'overview-finding' : ''} key={lineIndex}><CitationText text={line.replace(/^-\s+/, '')} sources={sources} /></p>)}</section>
   }) : <p>{cleanMarkdown(answer)}</p>
-  return <div className="search-overview"><div><Sparkles size={15} /> AI overview</div><div className={`overview-content ${expanded ? 'expanded' : ''}`}>{content}</div>{answer.length > 260 && <button className="overview-expand" onClick={onToggle}>{expanded ? 'Show less' : 'Show full overview'} <ChevronDown size={14} /></button>}</div>
+  return <div className="search-overview"><div><Sparkles size={15} /> AI overview</div><div className={`overview-content ${expanded ? 'expanded' : ''}`}>{content}</div><button className="overview-expand" onClick={onToggle}>{expanded ? 'Show less' : 'Show full overview'} <ChevronDown size={14} /></button></div>
 }
 
 function EvidenceRow({ source }: { source: SearchSource }) {
