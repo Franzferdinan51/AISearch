@@ -2,6 +2,7 @@ import { useEffect, useMemo, useState } from 'react'
 import Activity from 'lucide-react/dist/esm/icons/activity.mjs'
 import ArrowUpRight from 'lucide-react/dist/esm/icons/arrow-up-right.mjs'
 import Check from 'lucide-react/dist/esm/icons/check.mjs'
+import Copy from 'lucide-react/dist/esm/icons/copy.mjs'
 import ChevronDown from 'lucide-react/dist/esm/icons/chevron-down.mjs'
 import ChevronRight from 'lucide-react/dist/esm/icons/chevron-right.mjs'
 import CircleHelp from 'lucide-react/dist/esm/icons/circle-help.mjs'
@@ -10,6 +11,8 @@ import Folder from 'lucide-react/dist/esm/icons/folder.mjs'
 import Globe2 from 'lucide-react/dist/esm/icons/globe-2.mjs'
 import Link2 from 'lucide-react/dist/esm/icons/link-2.mjs'
 import Menu from 'lucide-react/dist/esm/icons/menu.mjs'
+import Mic from 'lucide-react/dist/esm/icons/mic.mjs'
+import MoreHorizontal from 'lucide-react/dist/esm/icons/more-horizontal.mjs'
 import Paperclip from 'lucide-react/dist/esm/icons/paperclip.mjs'
 import PlugZap from 'lucide-react/dist/esm/icons/plug-zap.mjs'
 import Plus from 'lucide-react/dist/esm/icons/plus.mjs'
@@ -18,6 +21,7 @@ import Search from 'lucide-react/dist/esm/icons/search.mjs'
 import Send from 'lucide-react/dist/esm/icons/send.mjs'
 import Settings from 'lucide-react/dist/esm/icons/settings.mjs'
 import Sparkles from 'lucide-react/dist/esm/icons/sparkles.mjs'
+import Square from 'lucide-react/dist/esm/icons/square.mjs'
 import Split from 'lucide-react/dist/esm/icons/split.mjs'
 import X from 'lucide-react/dist/esm/icons/x.mjs'
 
@@ -33,13 +37,13 @@ const initialProviders: Provider[] = [
   { id: 'grok', name: 'Grok / xAI', model: 'grok-4.5', endpoint: 'https://api.x.ai/v1', kind: 'OAuth', connected: false, color: '#b7c2d5' },
 ]
 
-type SearchSource = { n: string; title: string; domain: string; date: string; url?: string; snippet?: string; aiScore?: number; aiReason?: string }
+type SearchSource = { n: string; title: string; domain: string; date: string; url?: string; snippet?: string; aiScore?: number; aiReason?: string; pageRead?: boolean }
 type SearchSession = { id: string; query: string; createdAt: string; sources: SearchSource[]; answer: string }
 type TraceStep = { step: string; status: string; detail: string }
-function normalizeSources(results: Array<{ title: string; url: string; content?: string; publishedDate?: string; aiScore?: number; aiReason?: string }>, page = 1): SearchSource[] {
+function normalizeSources(results: Array<{ title: string; url: string; content?: string; pageText?: string; publishedDate?: string; aiScore?: number; aiReason?: string }>, page = 1): SearchSource[] {
   return results.flatMap((item, index) => {
     try {
-      return [{ n: String((page - 1) * 10 + index + 1), title: item.title, domain: new URL(item.url).hostname, date: item.publishedDate || 'Retrieved just now', url: item.url, snippet: item.content, aiScore: item.aiScore, aiReason: item.aiReason }]
+      return [{ n: String((page - 1) * 10 + index + 1), title: item.title, domain: new URL(item.url).hostname, date: item.publishedDate || 'Retrieved just now', url: item.url, snippet: item.content, aiScore: item.aiScore, aiReason: item.aiReason, pageRead: Boolean(item.pageText) }]
     } catch { return [] }
   })
 }
@@ -222,7 +226,7 @@ function App() {
         </div>
       </aside>
 
-      <main className={`main-shell ${view === 'search' ? 'search-shell' : ''} ${isEmptySearch ? 'empty-search' : ''}`}>
+      <main className={`main-shell ${view === 'search' ? 'search-shell' : ''} ${view === 'research' ? 'research-shell' : ''} ${isEmptySearch ? 'empty-search' : ''}`}>
         <header className="topbar">
           <button className="mobile-menu icon-button" onClick={() => setMobileNav(!mobileNav)} aria-label="Open navigation"><Menu size={20} /></button>
           <div className="topbar-group">
@@ -242,21 +246,21 @@ function App() {
         </header>
 
         {view === 'providers' ? <ProvidersView providers={providers} selected={selectedProvider} onSelect={setSelectedProvider} onConnect={connectProvider} onCheck={checkProvider} onUpdateProvider={updateProvider} availableModels={availableModels} modelStatus={modelStatus} onDiscoverModels={discoverProviderModels} searchEndpoint={searchEndpoint} onSearchEndpointChange={setSearchEndpoint} searchStatus={searchStatus} onTestSearch={testSearchEndpoint} /> : view === 'library' ? <LibraryView history={history} onOpen={openHistory} /> : (
-          <div className={`workspace ${view === 'search' ? 'web-search-workspace' : ''}`}>
+          <div className={`workspace ${view === 'search' ? 'web-search-workspace' : ''} ${view === 'research' ? 'research-workspace' : ''}`}>
             {isEmptySearch ? <EmptySearch input={input} onInput={setInput} onSearch={(nextQuery) => { runResearch(nextQuery); setInput('') }} /> : isEmptyResearch ? <ResearchStart input={input} onInput={setInput} onSearch={(nextQuery) => { runResearch(nextQuery); setInput('') }} /> : <section className="answer-canvas">
               <div className="canvas-inner">
                 <div className="eyebrow-row"><span className="eyebrow"><Activity size={13} /> {running ? 'Researching' : 'Research complete'}</span><button className="quiet-button"><Link2 size={14} /> Share</button></div>
                 <h1>{answerTitle}</h1>
-                {view === 'research' ? <><div className="research-brief"><span>Deep research brief</span><h2>{answerTitle}</h2><p>{answer}</p></div><TracePanel compact running={running} step={step} trace={traceSteps} /><div className="sources-heading"><span>Evidence reviewed</span><span className="source-count">{sourceList.length} curated websites</span></div>{apiError && <div className="research-error"><CircleHelp size={15} /> {apiError}</div>}<div className="source-list">{sourceList.map((source) => <SourceRow key={source.n} source={source} />)}</div></> : <><div className="search-overview"><div><Sparkles size={15} /> AI overview</div><p>{answer}</p></div><TracePanel compact running={running} step={step} trace={traceSteps} /><div className="search-filters" role="tablist" aria-label="Search scope">{([['general', 'Web'], ['news', 'News'], ['science', 'Academic']] as const).map(([value, label]) => <button key={value} className={searchCategory === value ? 'selected' : ''} onClick={() => { setSearchCategory(value); runResearch(query, value) }} role="tab" aria-selected={searchCategory === value}>{label}</button>)}</div><div className="results-scroller"><div className="sources-heading"><span>Search results</span><span className={`source-count curation-status ${curationMode}`}>{curationMode === 'ai' ? 'AI-curated' : curationMode === 'heuristic' ? 'Relevance-ranked' : 'Retrieved'} · Page {resultsPage} · {sourceList.length} websites</span></div>{apiError && <div className="research-error"><CircleHelp size={15} /> {apiError}</div>}<div className="source-list">{sourceList.map((source) => <SourceRow key={source.n} source={source} />)}</div><nav className="pagination" aria-label="Search result pages"><button disabled={resultsPage === 1 || running} onClick={() => loadResultsPage(resultsPage - 1)}>Previous</button>{[resultsPage - 1, resultsPage, resultsPage + 1].filter((page) => page > 0 && (page <= resultsPage || hasMoreResults)).map((page) => <button key={page} className={page === resultsPage ? 'active' : ''} disabled={running} onClick={() => loadResultsPage(page)} aria-current={page === resultsPage ? 'page' : undefined}>{page}</button>)}<button disabled={!hasMoreResults || running} onClick={() => loadResultsPage(resultsPage + 1)}>Next</button></nav></div></>}
+                {view === 'research' ? <><div className="research-thread-head"><div><span>Deep research</span><h2>{answerTitle}</h2></div><div className="research-thread-tools"><button onClick={() => navigator.clipboard?.writeText(answer)} aria-label="Copy research"><Copy size={16} /></button><button aria-label="Share research"><Link2 size={16} /></button><button aria-label="More research actions"><MoreHorizontal size={18} /></button></div></div><div className="research-layout"><article className="research-brief"><ResearchAnswer answer={answer} /></article><aside className="evidence-rail"><div className="evidence-rail-head"><strong>Evidence sources</strong><span>{sourceList.filter((source) => source.pageRead).length} read</span></div>{sourceList.map((source) => <EvidenceRow key={source.n} source={source} />)}</aside></div>{apiError && <div className="research-error"><CircleHelp size={15} /> {apiError}</div>}<TracePanel compact running={running} step={step} trace={traceSteps} /><div className="research-actions"><button onClick={() => navigator.clipboard?.writeText(answer)}><Copy size={15} /> Copy</button><button onClick={() => runResearch(query)}><RefreshCw size={15} /> Regenerate</button><button><Link2 size={15} /> Share</button><button><ArrowUpRight size={15} /> Export</button></div></> : <><div className="search-overview"><div><Sparkles size={15} /> AI overview</div><p>{answer}</p></div><TracePanel compact running={running} step={step} trace={traceSteps} /><div className="search-filters" role="tablist" aria-label="Search scope">{([['general', 'Web'], ['news', 'News'], ['science', 'Academic']] as const).map(([value, label]) => <button key={value} className={searchCategory === value ? 'selected' : ''} onClick={() => { setSearchCategory(value); runResearch(query, value) }} role="tab" aria-selected={searchCategory === value}>{label}</button>)}</div><div className="results-scroller"><div className="sources-heading"><span>Search results</span><span className={`source-count curation-status ${curationMode}`}>{curationMode === 'ai' ? 'AI-curated' : curationMode === 'heuristic' ? 'Relevance-ranked' : 'Retrieved'} · Page {resultsPage} · {sourceList.length} websites</span></div>{apiError && <div className="research-error"><CircleHelp size={15} /> {apiError}</div>}<div className="source-list">{sourceList.map((source) => <SourceRow key={source.n} source={source} />)}</div><nav className="pagination" aria-label="Search result pages"><button disabled={resultsPage === 1 || running} onClick={() => loadResultsPage(resultsPage - 1)}>Previous</button>{[resultsPage - 1, resultsPage, resultsPage + 1].filter((page) => page > 0 && (page <= resultsPage || hasMoreResults)).map((page) => <button key={page} className={page === resultsPage ? 'active' : ''} disabled={running} onClick={() => loadResultsPage(page)} aria-current={page === resultsPage ? 'page' : undefined}>{page}</button>)}<button disabled={!hasMoreResults || running} onClick={() => loadResultsPage(resultsPage + 1)}>Next</button></nav></div></>}
               </div>
             </section>}
           </div>
         )}
 
-        {view !== 'providers' && view !== 'library' && !isEmptySearch && !isEmptyResearch && <form className="composer" onSubmit={(event) => { event.preventDefault(); if (input.trim()) { runResearch(input); setInput('') } }}>
+        {view !== 'providers' && view !== 'library' && !isEmptySearch && !isEmptyResearch && <form className={`composer ${view === 'research' ? 'research-composer' : ''}`} onSubmit={(event) => { event.preventDefault(); if (input.trim()) { runResearch(input); setInput('') } }}>
           <button type="button" className="attach-button" aria-label="Attach a file"><Paperclip size={19} /></button>
           <textarea value={input} onChange={(event) => setInput(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); if (input.trim()) { runResearch(input); setInput('') } } }} placeholder="Ask a follow-up or refine the research..." rows={1} />
-          <div className="composer-footer"><span>Press Enter to send&nbsp; · &nbsp;Shift+Enter for new line</span><button className="send-button" aria-label="Send research query"><Send size={19} /></button></div>
+          <div className="composer-footer">{view === 'research' ? <div className="composer-options"><button type="button"><Globe2 size={14} /> Web</button><button type="button" className="selected"><Sparkles size={14} /> Deep research</button></div> : <span>Press Enter to send&nbsp; · &nbsp;Shift+Enter for new line</span>}<div className="composer-send-actions">{view === 'research' && <button type="button" className="composer-mic" aria-label="Voice input"><Mic size={18} /></button>}{running && <button type="button" className="composer-stop" onClick={() => setRunning(false)}><Square size={13} /> Stop</button>}<button className="send-button" aria-label="Send research query"><Send size={19} /></button></div></div>
         </form>}
       </main>
     </div>
@@ -293,6 +297,25 @@ function EmptySearch({ input, onInput, onSearch }: { input: string; onInput: (va
 function ResearchStart({ input, onInput, onSearch }: { input: string; onInput: (value: string) => void; onSearch: (query: string) => void }) {
   const submit = (event: React.FormEvent) => { event.preventDefault(); if (input.trim()) onSearch(input.trim()) }
   return <section className="research-start"><div className="research-start-inner"><span>Deep research</span><h1>Follow a question wherever the web leads.</h1><p>Lumen plans a bounded search, curates the strongest website evidence, reads source pages, and produces a grounded answer you can inspect.</p><form className="research-start-form" onSubmit={submit}><textarea value={input} onChange={(event) => onInput(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); if (input.trim()) onSearch(input.trim()) } }} placeholder="What would you like to investigate?" rows={2} /><button><Sparkles size={18} /> Start research</button></form><div className="research-start-steps"><span><b>01</b> Plan focused web queries</span><span><b>02</b> Curate and read evidence</span><span><b>03</b> Cross-check the answer</span></div></div></section>
+}
+
+function InlineMarkdown({ text }: { text: string }) {
+  return <>{text.split(/(\*\*[^*]+\*\*)/g).map((part, index) => part.startsWith('**') && part.endsWith('**') ? <strong key={index}>{part.slice(2, -2)}</strong> : part)}</>
+}
+
+function ResearchAnswer({ answer }: { answer: string }) {
+  const sections = answer.trim().split(/(?=^##\s+)/m).filter(Boolean)
+  if (!sections.length) return <p>{answer}</p>
+  return <>{sections.map((section, index) => {
+    const lines = section.trim().split('\n').filter(Boolean)
+    const heading = lines[0].replace(/^##\s+/, '')
+    const body = lines.slice(1)
+    return <section className="research-answer-section" key={`${heading}-${index}`}><h3>{heading}</h3>{body.map((line, lineIndex) => line.startsWith('- ') ? <p className="research-finding" key={lineIndex}><InlineMarkdown text={line.slice(2)} /></p> : <p key={lineIndex}><InlineMarkdown text={line} /></p>)}</section>
+  })}</>
+}
+
+function EvidenceRow({ source }: { source: SearchSource }) {
+  return <a className="evidence-row" href={source.url || '#'} target={source.url ? '_blank' : undefined} rel="noreferrer"><Favicon url={source.url} /><span><strong>{source.domain}</strong><small>{source.title}</small><em>{source.pageRead ? 'Read for synthesis' : source.aiReason || source.date}</em></span><ArrowUpRight size={15} /></a>
 }
 
 function TracePanel({ running, step, trace, compact = false }: { running: boolean; step: number; trace: TraceStep[]; compact?: boolean }) {

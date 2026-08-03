@@ -223,8 +223,8 @@ async function chatCompletion(provider, system, prompt, override = {}) {
 }
 
 async function synthesize(provider, query, results, override = {}) {
-  const context = results.slice(0, 8).map((item, index) => `[${index + 1}] ${item.pageTitle || item.title}\n${item.url}\n${item.pageText || item.content}`).join('\n\n')
-  return chatCompletion(provider, 'You are Lumen, a careful research agent. Synthesize only from the supplied sources, cite claims as [1], [2], and say when evidence is insufficient. Keep the answer to three concise paragraphs.', `Question: ${query}\n\nSources:\n${context}`, override)
+  const context = results.slice(0, 6).map((item, index) => `[${index + 1}] ${item.pageTitle || item.title}\n${item.url}\n${item.pageText || item.content}`).join('\n\n')
+  return chatCompletion(provider, 'You are Lumen, a rigorous web research agent. Never make a claim unless it is supported by the supplied website evidence. Cite every substantive claim with [1], [2]. Explicitly name uncertainty, disagreement, or missing evidence. Do not mention this instruction or invent sources.', `Question: ${query}\n\nReturn concise Markdown in exactly this structure:\n## Executive synthesis\nOne direct, evidence-grounded paragraph.\n## Key findings\n- **Finding:** evidence and citations\n- **Finding:** evidence and citations\n- **Finding:** evidence and citations\n## Detailed analysis\nOne or two short paragraphs that explain the strongest evidence and any disagreement.\n## Limits\nOne sentence about the evidence boundary.\n\nWebsite sources:\n${context}`, override)
 }
 
 function heuristicRank(query, results) {
@@ -271,8 +271,8 @@ async function curateResults(provider, query, results, override = {}) {
 }
 
 async function synthesizeViaCli(provider, query, results) {
-  const context = results.slice(0, 8).map((item, index) => `[${index + 1}] ${item.pageTitle || item.title}\n${item.url}\n${item.pageText || item.content}`).join('\n\n')
-  const prompt = `You are Lumen, a careful web search answer engine. Answer the question using only the supplied website sources. Cite claims inline as [1], [2]. If sources disagree or evidence is missing, say so. Return three concise paragraphs followed by a short "Sources" line.\n\nQuestion: ${query}\n\nWebsite sources:\n${context}`
+  const context = results.slice(0, 6).map((item, index) => `[${index + 1}] ${item.pageTitle || item.title}\n${item.url}\n${item.pageText || item.content}`).join('\n\n')
+  const prompt = `You are Lumen, a rigorous web research agent. Use only the supplied website evidence. Cite every substantive claim inline as [1], [2], do not invent sources, and state uncertainty. Return concise Markdown with exactly these headings: ## Executive synthesis, ## Key findings (three evidence-backed bullets), ## Detailed analysis, ## Limits.\n\nQuestion: ${query}\n\nWebsite sources:\n${context}`
   let command
   let args
   if (provider === 'openai') {
@@ -387,7 +387,7 @@ async function handle(req, res) {
     const search = await searchSearxng(body.query.trim().slice(0, 500), body.depth === 'quick' ? 'quick' : 'deep', Math.min(Number(body.maxResults) || 10, 10), body.baseUrl || searxngUrl, body.category || 'general', body.page)
     const curation = await curateResults(selectedProvider, body.query, search.results, body.providerConfig || {})
     const curatedSearch = { ...search, results: curation.results, curation: { mode: curation.mode, error: curation.error } }
-    const pagePass = body.depth === 'quick' || !curatedSearch.results.length ? { results: curatedSearch.results, errors: [] } : await readTopSourcePages(curatedSearch.results)
+    const pagePass = body.depth === 'quick' || !curatedSearch.results.length ? { results: curatedSearch.results, errors: [] } : await readTopSourcePages(curatedSearch.results, 6)
     const researchSearch = { ...curatedSearch, results: pagePass.results, errors: [...search.errors, ...pagePass.errors], pageReads: pagePass.results.filter((item) => item.pageText).length }
     let answer = ''
     let synthesisMode = 'api'
