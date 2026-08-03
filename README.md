@@ -40,6 +40,10 @@ OAuth status and login routes invoke the configured local CLI (`codex`, `mmx`, o
 
 The bridge follows the installed CLI contracts: `codex login`, `mmx auth login`, and `grok login --oauth`; Grok auth status is checked with `grok models`. Set `OPENAI_CODEX_MODEL` only if the installed Codex build exposes a compatible ChatGPT OAuth model.
 
+## Settings
+
+The **Settings** page is separate from **Providers**. It saves browser-local preferences for the default new-search mode, compact or comfortable result density, preloading ranked result tabs, and whether AI Overviews appear in general web searches. The page also links to Provider management and can clear the local search library.
+
 Useful API routes:
 
 - `GET /api/health`

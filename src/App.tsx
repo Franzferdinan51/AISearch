@@ -29,6 +29,7 @@ type Mode = 'Web search' | 'Quick answer' | 'Deep research' | 'Explore'
 type SearchCategory = 'general' | 'news' | 'images' | 'videos' | 'github' | 'science'
 type Provider = { id: string; name: string; model: string; endpoint: string; kind: string; connected: boolean; authPending?: boolean; color: string; apiKey?: string }
 type ModelOption = { id: string; label: string; architecture?: string | null; quantization?: string | null }
+type Preferences = { defaultMode: Mode; warmTabs: boolean; showOverview: boolean; resultDensity: 'comfortable' | 'compact' }
 
 const providerModelSuggestions: Record<string, ModelOption[]> = {
   openai: [{ id: 'gpt-5', label: 'GPT-5' }, { id: 'gpt-5-mini', label: 'GPT-5 mini' }, { id: 'gpt-4.1', label: 'GPT-4.1' }, { id: 'o4-mini', label: 'o4-mini' }],
@@ -54,6 +55,14 @@ function loadSavedProviders() {
   } catch { return initialProviders }
 }
 
+const defaultPreferences: Preferences = { defaultMode: 'Web search', warmTabs: true, showOverview: true, resultDensity: 'comfortable' }
+function loadPreferences(): Preferences {
+  try {
+    const saved = JSON.parse(localStorage.getItem('lumen-preferences') || '{}')
+    return { ...defaultPreferences, ...saved }
+  } catch { return defaultPreferences }
+}
+
 type SearchSource = { n: string; title: string; domain: string; date: string; url?: string; snippet?: string; aiScore?: number; aiReason?: string; pageRead?: boolean }
 type SearchSession = { id: string; query: string; createdAt: string; sources: SearchSource[]; answer: string }
 type TraceStep = { step: string; status: string; detail: string }
@@ -70,9 +79,10 @@ function cleanMarkdown(value: string) {
 }
 
 function App() {
-  const [view, setView] = useState<'search' | 'research' | 'library' | 'providers'>('search')
+  const [view, setView] = useState<'search' | 'research' | 'library' | 'providers' | 'settings'>('search')
   const [mode, setMode] = useState<Mode>('Web search')
   const [providers, setProviders] = useState(loadSavedProviders)
+  const [preferences, setPreferences] = useState<Preferences>(loadPreferences)
   const [selectedProvider, setSelectedProvider] = useState(() => {
     const saved = localStorage.getItem('lumen-default-provider')
     return saved && initialProviders.some((provider) => provider.id === saved) ? saved : 'lmstudio'
@@ -125,6 +135,7 @@ function App() {
   useEffect(() => localStorage.setItem('lumen-default-provider', selectedProvider), [selectedProvider])
   useEffect(() => localStorage.setItem('lumen-search-endpoint', searchEndpoint), [searchEndpoint])
   useEffect(() => localStorage.setItem('lumen-history', JSON.stringify(history.slice(0, 20))), [history])
+  useEffect(() => localStorage.setItem('lumen-preferences', JSON.stringify(preferences)), [preferences])
 
   const discoverProviderModels = async (id: string) => {
     const target = providers.find((item) => item.id === id)
@@ -157,13 +168,13 @@ function App() {
     setResultsPage(1)
     setApiError('')
     setOverviewExpanded(false)
-    if (activeView === 'search' && nextCategory === 'general') warmSearchTabs(nextQuery)
+    if (preferences.warmTabs && activeView === 'search' && nextCategory === 'general') warmSearchTabs(nextQuery)
     let current = 0
     const timer = window.setInterval(() => { current += 1; setStep(Math.min(current, 5)); if (current >= 5) window.clearInterval(timer) }, 600)
     try {
       const isDeep = activeMode === 'Deep research' || activeMode === 'Explore' || activeView === 'research'
       const endpoint = activeView === 'research' ? '/api/research' : '/api/search'
-      const response = await fetch(endpoint, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ query: nextQuery, provider: selectedProvider, providerConfig: { endpoint: provider.endpoint, model: provider.model, key: provider.apiKey }, baseUrl: searchEndpoint, category: nextCategory, depth: isDeep ? 'deep' : 'quick', maxResults: activeMode === 'Quick answer' ? 5 : 10, page: 1, includeOverview: nextCategory === 'general' }) })
+      const response = await fetch(endpoint, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ query: nextQuery, provider: selectedProvider, providerConfig: { endpoint: provider.endpoint, model: provider.model, key: provider.apiKey }, baseUrl: searchEndpoint, category: nextCategory, depth: isDeep ? 'deep' : 'quick', maxResults: activeMode === 'Quick answer' ? 5 : 10, page: 1, includeOverview: preferences.showOverview && nextCategory === 'general' }) })
       const payload = await response.json()
       if (!response.ok) throw new Error(payload.error || 'Research request failed')
       const normalized = normalizeSources(payload.search?.results || payload.results || [], 1)
@@ -247,7 +258,7 @@ function App() {
 
   const answerTitle = useMemo(() => query || 'Start a new research thread', [query])
   const openHistory = (session: SearchSession) => { setQuery(session.query); setSourceList(session.sources); setAnswer(session.answer); setResultsPage(1); setHasMoreResults(true); setView('search') }
-  const newSearch = () => { setView('search'); setMode('Web search'); setQuery(''); setInput(''); setSourceList([]); setAnswer(''); setTraceSteps([]); setApiError(''); setResultsPage(1); setHasMoreResults(true); setCurationMode('none'); setRunning(false) }
+  const newSearch = () => { const nextMode = preferences.defaultMode; setView(nextMode === 'Deep research' || nextMode === 'Explore' ? 'research' : 'search'); setMode(nextMode); setQuery(''); setInput(''); setSourceList([]); setAnswer(''); setTraceSteps([]); setApiError(''); setResultsPage(1); setHasMoreResults(true); setCurationMode('none'); setRunning(false) }
   const selectMode = (nextMode: Mode) => {
     const nextView = nextMode === 'Deep research' || nextMode === 'Explore' ? 'research' : 'search'
     setMode(nextMode)
@@ -270,6 +281,7 @@ function App() {
           <NavItem icon={<Split size={19} />} label="Research" active={view === 'research'} onClick={() => { setView('research'); setMode('Deep research'); setMobileNav(false) }} />
           <NavItem icon={<Folder size={19} />} label="Library" active={view === 'library'} onClick={() => { setView('library'); setMobileNav(false) }} />
           <NavItem icon={<PlugZap size={19} />} label="Providers" active={view === 'providers'} onClick={() => { setView('providers'); setMobileNav(false) }} />
+          <NavItem icon={<Settings size={19} />} label="Settings" active={view === 'settings'} onClick={() => { setView('settings'); setMobileNav(false) }} />
         </nav>
         <button className="new-search-button" onClick={newSearch}><Plus size={17} /> New search</button>
         <div className="sidebar-bottom">
@@ -292,24 +304,24 @@ function App() {
               <button className="select-button" onClick={() => setShowProvider(!showProvider)}><ProviderIcon provider={provider} />{provider.name} <span className="muted-dot">•</span>{provider.model}<ChevronDown size={16} /></button>
               {showProvider && <Dropdown custom items={providers.map((item) => `${item.name} • ${item.model}`)} onSelect={(item) => { const found = providers.find((p) => `${p.name} • ${p.model}` === item); if (found) setSelectedProvider(found.id); setShowProvider(false) }} />}
             </div>
-            <button className="icon-button gear" onClick={() => setView('providers')} aria-label="Provider settings"><Settings size={18} /></button>
+            <button className="icon-button gear" onClick={() => setView('settings')} aria-label="Settings"><Settings size={18} /></button>
             <button className="avatar-button" aria-label="Account">AV <ChevronDown size={14} /></button>
           </div>
         </header>
 
-        {view === 'providers' ? <ProvidersView providers={providers} selected={selectedProvider} onSelect={setSelectedProvider} onConnect={connectProvider} onCheck={checkProvider} onUpdateProvider={updateProvider} availableModels={availableModels} modelStatus={modelStatus} onDiscoverModels={discoverProviderModels} searchEndpoint={searchEndpoint} onSearchEndpointChange={setSearchEndpoint} searchStatus={searchStatus} onTestSearch={testSearchEndpoint} /> : view === 'library' ? <LibraryView history={history} onOpen={openHistory} /> : (
-          <div className={`workspace ${view === 'search' ? 'web-search-workspace' : ''} ${view === 'research' ? 'research-workspace' : ''}`}>
+        {view === 'providers' ? <ProvidersView providers={providers} selected={selectedProvider} onSelect={setSelectedProvider} onConnect={connectProvider} onCheck={checkProvider} onUpdateProvider={updateProvider} availableModels={availableModels} modelStatus={modelStatus} onDiscoverModels={discoverProviderModels} searchEndpoint={searchEndpoint} onSearchEndpointChange={setSearchEndpoint} searchStatus={searchStatus} onTestSearch={testSearchEndpoint} /> : view === 'settings' ? <SettingsView preferences={preferences} onUpdate={(field, value) => setPreferences((current) => ({ ...current, [field]: value }))} onReset={() => setPreferences(defaultPreferences)} onClearHistory={() => { if (window.confirm('Clear all saved searches from this browser?')) setHistory([]) }} onOpenProviders={() => setView('providers')} /> : view === 'library' ? <LibraryView history={history} onOpen={openHistory} /> : (
+          <div className={`workspace ${view === 'search' ? 'web-search-workspace' : ''} ${view === 'research' ? 'research-workspace' : ''} ${preferences.resultDensity === 'compact' ? 'compact-results' : ''}`}>
             {isEmptySearch ? <EmptySearch input={input} mode={mode} onInput={setInput} onModeChange={selectMode} onSearch={(nextQuery) => { runResearch(nextQuery); setInput('') }} /> : isEmptyResearch ? <ResearchStart input={input} onInput={setInput} onSearch={(nextQuery) => { runResearch(nextQuery); setInput('') }} /> : <section className="answer-canvas">
               <div className="canvas-inner">
                 <div className="eyebrow-row"><span className="eyebrow"><Activity size={13} /> {running ? 'Researching' : 'Research complete'}</span><button className="quiet-button" onClick={shareResearch}><Link2 size={14} /> Share</button></div>
                 <h1>{answerTitle}</h1>
-                {view === 'research' ? <><div className="research-thread-head"><div><span>Deep research</span><h2>{answerTitle}</h2></div><div className="research-thread-tools"><button onClick={() => navigator.clipboard?.writeText(answer)} aria-label="Copy research"><Copy size={16} /></button><button onClick={shareResearch} aria-label="Share research"><Link2 size={16} /></button><button aria-label="More research actions" disabled title="More research actions are coming soon"><MoreHorizontal size={18} /></button></div></div><div className="research-layout"><article className="research-brief"><ResearchAnswer answer={answer} sources={sourceList} /></article><aside className="evidence-rail"><div className="evidence-rail-head"><strong>Evidence sources</strong><span>{sourceList.filter((source) => source.pageRead).length} read</span></div>{sourceList.map((source) => <EvidenceRow key={source.n} source={source} />)}</aside></div>{apiError && <div className="research-error"><CircleHelp size={15} /> {apiError}</div>}<TracePanel compact running={running} step={step} trace={traceSteps} /><div className="research-actions"><button onClick={() => navigator.clipboard?.writeText(answer)}><Copy size={15} /> Copy</button><button onClick={() => runResearch(query)}><RefreshCw size={15} /> Regenerate</button><button onClick={shareResearch}><Link2 size={15} /> Share</button><button onClick={exportResearch}><ArrowUpRight size={15} /> Export</button></div></> : <><SearchOverview answer={answer} sources={sourceList} expanded={overviewExpanded} onToggle={() => setOverviewExpanded(!overviewExpanded)} /><TracePanel compact running={running} step={step} trace={traceSteps} /><div className="search-filters" role="tablist" aria-label="Search scope">{([['general', 'Web'], ['news', 'News'], ['images', 'Images'], ['videos', 'Videos'], ['github', 'GitHub'], ['science', 'Academic']] as const).map(([value, label]) => <button key={value} className={searchCategory === value ? 'selected' : ''} onClick={() => { setSearchCategory(value); runResearch(query, value) }} role="tab" aria-selected={searchCategory === value}>{label}</button>)}</div><div className="results-scroller"><div className="sources-heading"><span>{searchCategory === 'github' ? 'GitHub results' : searchCategory === 'images' ? 'Image results' : searchCategory === 'videos' ? 'Video results' : 'Search results'}</span><span className={`source-count curation-status ${curationMode}`}>{curationMode === 'ai' ? 'AI-curated' : curationMode === 'heuristic' ? 'Relevance-ranked' : 'Retrieved'} · Page {resultsPage} · {sourceList.length} results</span></div>{apiError && <div className="research-error"><CircleHelp size={15} /> {apiError}</div>}<div className="source-list">{sourceList.map((source) => <SourceRow key={source.n} source={source} />)}</div></div><ResultPagination page={resultsPage} hasMore={hasMoreResults} running={running} onPage={loadResultsPage} /></>}
+                {view === 'research' ? <><div className="research-thread-head"><div><span>Deep research</span><h2>{answerTitle}</h2></div><div className="research-thread-tools"><button onClick={() => navigator.clipboard?.writeText(answer)} aria-label="Copy research"><Copy size={16} /></button><button onClick={shareResearch} aria-label="Share research"><Link2 size={16} /></button><button aria-label="More research actions" disabled title="More research actions are coming soon"><MoreHorizontal size={18} /></button></div></div><div className="research-layout"><article className="research-brief"><ResearchAnswer answer={answer} sources={sourceList} /></article><aside className="evidence-rail"><div className="evidence-rail-head"><strong>Evidence sources</strong><span>{sourceList.filter((source) => source.pageRead).length} read</span></div>{sourceList.map((source) => <EvidenceRow key={source.n} source={source} />)}</aside></div>{apiError && <div className="research-error"><CircleHelp size={15} /> {apiError}</div>}<TracePanel compact running={running} step={step} trace={traceSteps} /><div className="research-actions"><button onClick={() => navigator.clipboard?.writeText(answer)}><Copy size={15} /> Copy</button><button onClick={() => runResearch(query)}><RefreshCw size={15} /> Regenerate</button><button onClick={shareResearch}><Link2 size={15} /> Share</button><button onClick={exportResearch}><ArrowUpRight size={15} /> Export</button></div></> : <>{preferences.showOverview && <SearchOverview answer={answer} sources={sourceList} expanded={overviewExpanded} onToggle={() => setOverviewExpanded(!overviewExpanded)} />}<TracePanel compact running={running} step={step} trace={traceSteps} /><div className="search-filters" role="tablist" aria-label="Search scope">{([['general', 'Web'], ['news', 'News'], ['images', 'Images'], ['videos', 'Videos'], ['github', 'GitHub'], ['science', 'Academic']] as const).map(([value, label]) => <button key={value} className={searchCategory === value ? 'selected' : ''} onClick={() => { setSearchCategory(value); runResearch(query, value) }} role="tab" aria-selected={searchCategory === value}>{label}</button>)}</div><div className="results-scroller"><div className="sources-heading"><span>{searchCategory === 'github' ? 'GitHub results' : searchCategory === 'images' ? 'Image results' : searchCategory === 'videos' ? 'Video results' : 'Search results'}</span><span className={`source-count curation-status ${curationMode}`}>{curationMode === 'ai' ? 'AI-curated' : curationMode === 'heuristic' ? 'Relevance-ranked' : 'Retrieved'} · Page {resultsPage} · {sourceList.length} results</span></div>{apiError && <div className="research-error"><CircleHelp size={15} /> {apiError}</div>}<div className="source-list">{sourceList.map((source) => <SourceRow key={source.n} source={source} />)}</div></div><ResultPagination page={resultsPage} hasMore={hasMoreResults} running={running} onPage={loadResultsPage} /></>}
               </div>
             </section>}
           </div>
         )}
 
-        {view !== 'providers' && view !== 'library' && !isEmptySearch && !isEmptyResearch && <form className={`composer ${view === 'research' ? 'research-composer' : ''}`} onSubmit={(event) => { event.preventDefault(); if (input.trim()) { runResearch(input); setInput('') } }}>
+        {view !== 'providers' && view !== 'settings' && view !== 'library' && !isEmptySearch && !isEmptyResearch && <form className={`composer ${view === 'research' ? 'research-composer' : ''}`} onSubmit={(event) => { event.preventDefault(); if (input.trim()) { runResearch(input); setInput('') } }}>
           <button type="button" className="attach-button" aria-label="Attach a file" disabled title="File search is not configured yet"><Paperclip size={19} /></button>
           <textarea value={input} onChange={(event) => setInput(event.target.value)} onKeyDown={(event) => { if (event.key === 'Enter' && !event.shiftKey) { event.preventDefault(); if (input.trim()) { runResearch(input); setInput('') } } }} placeholder="Ask a follow-up or refine the research..." rows={1} />
           <div className="composer-footer">{view === 'research' ? <div className="composer-options"><button type="button"><Globe2 size={14} /> Web</button><button type="button" className="selected"><Sparkles size={14} /> Deep research</button></div> : <span>Press Enter to send&nbsp; · &nbsp;Shift+Enter for new line</span>}<div className="composer-send-actions">{view === 'research' && <button type="button" className="composer-mic" aria-label="Voice input" disabled title="Voice input is not configured yet"><Mic size={18} /></button>}{running && <button type="button" className="composer-stop" onClick={() => setRunning(false)}><Square size={13} /> Stop</button>}<button className="send-button" aria-label="Send research query"><Send size={19} /></button></div></div>
@@ -404,6 +416,17 @@ function TracePanel({ running, step, trace, compact = false }: { running: boolea
   return <section className="trace-panel"><div className="trace-header"><span><Activity size={20} /> Agent trace</span><span className="live"><i /> {running ? 'Live' : 'Ready'}</span><button>Clear</button></div><div className="trace-list">{events.map(([title, desc, time], index) => { const done = index < step; const active = index === step; const recorded = trace.find((item) => item.step === title); return <div className={`trace-event ${done ? 'done' : ''} ${active ? 'current' : ''}`} key={title}><div className="event-marker">{done ? <Check size={14} /> : active ? <span /> : null}</div><div className="event-copy"><div className="event-title"><strong>{title}</strong><span>{time} {active ? <ChevronDown size={15} /> : done ? <ChevronDown size={15} /> : ''}</span></div><p>{recorded?.detail || desc}</p>{(active || done) && index === 4 && <div className="connected-list"><ConnectedCard label="SearXNG" sub="docs.searxng.org" icon="search" /><ConnectedCard label="Vane" sub="agentic search pattern" icon="vane" /><ConnectedCard label="LM Studio" sub="localhost:1234" icon="lm" /></div>}</div></div> })}</div></section>
 }
 function ConnectedCard({ label, sub, icon }: { label: string; sub: string; icon: string }) { return <div className="connected-card"><span className={`connected-icon ${icon}`}>{icon === 'search' ? <Search size={18} /> : icon === 'lm' ? <Sparkles size={16} /> : 'V'}</span><span><strong>{label}</strong><small>{sub}</small></span><span className="connected"><Check size={11} /> Connected</span><ChevronRight size={17} /></div> }
+
+function SettingsView({ preferences, onUpdate, onReset, onClearHistory, onOpenProviders }: { preferences: Preferences; onUpdate: (field: keyof Preferences, value: Preferences[keyof Preferences]) => void; onReset: () => void; onClearHistory: () => void; onOpenProviders: () => void }) {
+  return <div className="settings-view preferences-view">
+    <div className="settings-heading"><div><span className="section-kicker">Workspace</span><h1>Settings</h1><p>Control how Lumen starts a search, prepares its sources, and presents results. Model connections live separately in Providers.</p></div><button className="subtle-action" onClick={onReset}><RefreshCw size={14} /> Reset preferences</button></div>
+    <div className="settings-sections">
+      <section className="settings-section"><div className="settings-section-heading"><span className="settings-section-icon"><Sparkles size={17} /></span><div><h2>Search experience</h2><p>Defaults for every new search thread.</p></div></div><div className="setting-row"><div><strong>Default search mode</strong><small>Choose the mode that opens when you start a new search.</small></div><select aria-label="Default search mode" value={preferences.defaultMode} onChange={(event) => onUpdate('defaultMode', event.target.value as Mode)}>{(['Web search', 'Quick answer', 'Deep research', 'Explore'] as Mode[]).map((mode) => <option key={mode} value={mode}>{mode}</option>)}</select></div><div className="setting-row"><div><strong>Result density</strong><small>Use a tighter layout when you want to scan more websites at once.</small></div><select aria-label="Result density" value={preferences.resultDensity} onChange={(event) => onUpdate('resultDensity', event.target.value as Preferences['resultDensity'])}><option value="comfortable">Comfortable</option><option value="compact">Compact</option></select></div></section>
+      <section className="settings-section"><div className="settings-section-heading"><span className="settings-section-icon"><Activity size={17} /></span><div><h2>AI search</h2><p>Decide how much work happens before you switch tabs.</p></div></div><div className="setting-row"><div><strong>Preload ranked tabs</strong><small>Warm News, Images, Videos, GitHub, and Academic results after a web search.</small></div><button className={`setting-switch ${preferences.warmTabs ? 'on' : ''}`} role="switch" aria-checked={preferences.warmTabs} aria-label="Preload ranked tabs" onClick={() => onUpdate('warmTabs', !preferences.warmTabs)}><span /></button></div><div className="setting-row"><div><strong>Show AI Overview</strong><small>Generate and display the evidence-grounded overview above general web results.</small></div><button className={`setting-switch ${preferences.showOverview ? 'on' : ''}`} role="switch" aria-checked={preferences.showOverview} aria-label="Show AI Overview" onClick={() => onUpdate('showOverview', !preferences.showOverview)}><span /></button></div></section>
+      <section className="settings-section"><div className="settings-section-heading"><span className="settings-section-icon"><Folder size={17} /></span><div><h2>Data and connections</h2><p>Manage saved work and the services Lumen uses.</p></div></div><div className="setting-row"><div><strong>Model providers</strong><small>Set provider endpoints, OAuth connections, models, and LM Studio credentials.</small></div><button className="row-action" onClick={onOpenProviders}>Open Providers <ArrowUpRight size={14} /></button></div><div className="setting-row"><div><strong>Search library</strong><small>Remove saved searches and research threads from this browser.</small></div><button className="row-action danger" onClick={onClearHistory}>Clear library</button></div></section>
+    </div>
+  </div>
+}
 
   function ProvidersView({ providers, selected, onSelect, onConnect, onCheck, onUpdateProvider, availableModels, modelStatus, onDiscoverModels, searchEndpoint, onSearchEndpointChange, searchStatus, onTestSearch }: { providers: Provider[]; selected: string; onSelect: (id: string) => void; onConnect: (id: string) => void; onCheck: (id: string) => void; onUpdateProvider: (id: string, field: 'endpoint' | 'model' | 'apiKey', value: string) => void; availableModels: Record<string, ModelOption[]>; modelStatus: Record<string, string>; onDiscoverModels: (id: string) => void; searchEndpoint: string; onSearchEndpointChange: (value: string) => void; searchStatus: string; onTestSearch: () => void }) {
     return <div className="settings-view">
