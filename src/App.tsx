@@ -137,6 +137,10 @@ function App() {
 
   useEffect(() => { discoverProviderModels('lmstudio') }, [])
 
+  const warmSearchTabs = (nextQuery: string) => {
+    void fetch('/api/search/warm', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ query: nextQuery, baseUrl: searchEndpoint, maxResults: 10, provider: selectedProvider, providerConfig: { endpoint: provider.endpoint, model: provider.model } }) }).catch(() => {})
+  }
+
   const runResearch = async (nextQuery = query, nextCategory = searchCategory) => {
     if (!nextQuery.trim()) return
     setQuery(nextQuery)
@@ -150,7 +154,7 @@ function App() {
     try {
       const isDeep = mode === 'Deep research' || mode === 'Explore' || view === 'research'
       const endpoint = view === 'research' ? '/api/research' : '/api/search'
-      const response = await fetch(endpoint, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ query: nextQuery, provider: selectedProvider, providerConfig: { endpoint: provider.endpoint, model: provider.model }, baseUrl: searchEndpoint, category: nextCategory, depth: isDeep ? 'deep' : 'quick', maxResults: 10, page: 1 }) })
+      const response = await fetch(endpoint, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ query: nextQuery, provider: selectedProvider, providerConfig: { endpoint: provider.endpoint, model: provider.model }, baseUrl: searchEndpoint, category: nextCategory, depth: isDeep ? 'deep' : 'quick', maxResults: 10, page: 1, includeOverview: nextCategory === 'general' }) })
       const payload = await response.json()
       if (!response.ok) throw new Error(payload.error || 'Research request failed')
       const normalized = normalizeSources(payload.search?.results || payload.results || [], 1)
@@ -160,6 +164,7 @@ function App() {
       setAnswer(payload.answer || (nextCategory === 'news' ? `Latest news results for “${nextQuery}”.` : nextCategory === 'images' ? `Image results for “${nextQuery}”.` : nextCategory === 'videos' ? `Video results for “${nextQuery}”.` : nextCategory === 'github' ? `GitHub repositories for “${nextQuery}”.` : nextCategory === 'science' ? `Academic and technical results for “${nextQuery}”.` : `Found ${normalized.length} ${payload.curation?.mode === 'ai' ? 'AI-curated' : 'relevance-ranked'} web results for “${nextQuery}”. Review the overview and sources below, or switch to Deep research for a cited synthesis.`))
       if (payload.trace) setTraceSteps(payload.trace); else setTraceSteps([])
       if (normalized.length) setHistory((current) => [{ id: crypto.randomUUID(), query: nextQuery, createdAt: new Date().toISOString(), sources: normalized, answer: payload.answer || '' }, ...current.filter((item) => item.query !== nextQuery)].slice(0, 20))
+      if (view === 'search' && nextCategory === 'general' && normalized.length) warmSearchTabs(nextQuery)
       setStep(5)
     } catch (error) {
       setApiError(error instanceof Error ? error.message : 'Research API unavailable. Start `npm run dev:api`.')
@@ -174,7 +179,7 @@ function App() {
     setRunning(true)
     setApiError('')
     try {
-      const response = await fetch('/api/search', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ query, baseUrl: searchEndpoint, category: searchCategory, depth: 'quick', maxResults: 10, page, provider: selectedProvider, providerConfig: { endpoint: provider.endpoint, model: provider.model }, curate: true }) })
+      const response = await fetch('/api/search', { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ query, baseUrl: searchEndpoint, category: searchCategory, depth: 'quick', maxResults: 10, page, provider: selectedProvider, providerConfig: { endpoint: provider.endpoint, model: provider.model }, curate: true, includeOverview: false }) })
       const payload = await response.json()
       if (!response.ok) throw new Error(payload.error || 'Search results request failed')
       setSourceList(normalizeSources(payload.results || [], page))

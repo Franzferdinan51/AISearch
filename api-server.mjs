@@ -9,6 +9,9 @@ const host = process.env.LUMEN_API_HOST || '127.0.0.1'
 const searxngUrl = process.env.SEARXNG_URL || 'http://127.0.0.1:8080'
 const cache = new Map()
 const rankedSearchCache = new Map()
+const rankedSearchInflight = new Map()
+const warmSearchJobs = new Map()
+let interactiveSearches = 0
 const rankedSearchWindowPages = 4
 const appRoot = path.dirname(fileURLToPath(import.meta.url))
 const distRoot = path.join(appRoot, 'dist')
@@ -126,7 +129,7 @@ async function searchSearxng(query, depth = 'quick', maxResults = 10, configured
   return value
 }
 
-async function searchRankedWindow(query, maxResults = 10, configuredUrl = searxngUrl, category = 'general', requestedPage = 1, provider = 'lmstudio', override = {}, curate = true) {
+async function searchRankedWindow(query, maxResults = 10, configuredUrl = searxngUrl, category = 'general', requestedPage = 1, provider = 'lmstudio', override = {}, curate = true, includeOverview = true) {
   const page = Math.max(1, Math.floor(Number(requestedPage) || 1))
   const pageSize = Math.min(Math.max(1, Number(maxResults) || 10), 10)
   const cacheKey = JSON.stringify({ query, pageSize, configuredUrl, category, provider, endpoint: override.endpoint || '', model: override.model || '', curate })
@@ -136,34 +139,56 @@ async function searchRankedWindow(query, maxResults = 10, configuredUrl = searxn
   if (hit && Date.now() - hit.createdAt < 300_000) {
     ranked = { ...hit.value, cached: true }
   } else {
-    const pages = await Promise.all(Array.from({ length: rankedSearchWindowPages }, (_, index) => searchSearxng(query, 'quick', pageSize, configuredUrl, category, index + 1)))
-    const seenUrls = new Set()
-    const candidates = pages.flatMap((result) => result.results).filter((item) => {
-      if (seenUrls.has(item.url)) return false
-      seenUrls.add(item.url)
-      return true
-    })
-    const curation = curate ? await curateResults(provider, query, candidates, override) : { results: candidates, mode: 'disabled', error: null }
-    let answer = ''
-    let overviewError = null
-    if (curation.mode === 'ai' && curation.results.length) {
-      try { answer = await generateSearchOverview(provider, query, curation.results, override) } catch (error) { overviewError = error.message }
+    let pending = rankedSearchInflight.get(cacheKey)
+    if (!pending) {
+      pending = (async () => {
+        const pages = await Promise.all(Array.from({ length: rankedSearchWindowPages }, (_, index) => searchSearxng(query, 'quick', pageSize, configuredUrl, category, index + 1)))
+        const seenUrls = new Set()
+        const candidates = pages.flatMap((result) => result.results).filter((item) => {
+          if (seenUrls.has(item.url)) return false
+          seenUrls.add(item.url)
+          return true
+        })
+        const curation = curate ? await curateResults(provider, query, candidates, override) : { results: candidates, mode: 'disabled', error: null }
+        let answer = ''
+        let overviewError = null
+        if (includeOverview && curation.mode === 'ai' && curation.results.length) {
+          try { answer = await generateSearchOverview(provider, query, curation.results, override) } catch (error) { overviewError = error.message }
+        }
+        const value = {
+          provider: pages[0]?.provider || 'searxng', query, depth: 'quick', pageSize,
+          results: curation.results,
+          errors: pages.flatMap((result) => result.errors),
+          queries: [query],
+          budget: { requested: rankedSearchWindowPages, used: rankedSearchWindowPages },
+          curation: { mode: curation.mode, error: curation.error },
+          answer,
+          overviewError,
+        }
+        rankedSearchCache.set(cacheKey, { createdAt: Date.now(), value })
+        return value
+      })().finally(() => rankedSearchInflight.delete(cacheKey))
+      rankedSearchInflight.set(cacheKey, pending)
     }
-    ranked = {
-      provider: pages[0]?.provider || 'searxng', query, depth: 'quick', pageSize,
-      results: curation.results,
-      errors: pages.flatMap((result) => result.errors),
-      queries: [query],
-      budget: { requested: rankedSearchWindowPages, used: rankedSearchWindowPages },
-      curation: { mode: curation.mode, error: curation.error },
-      answer,
-      overviewError,
-    }
-    rankedSearchCache.set(cacheKey, { createdAt: Date.now(), value: ranked })
+    ranked = { ...(await pending), cached: true }
   }
 
   const start = (page - 1) * pageSize
   return { ...ranked, page, hasMore: ranked.results.length > start + pageSize, results: ranked.results.slice(start, start + pageSize) }
+}
+
+function warmSearchCategories(query, maxResults, configuredUrl, provider, override) {
+  const categories = ['news', 'github', 'science', 'images', 'videos']
+  const jobKey = JSON.stringify({ query, maxResults, configuredUrl, provider, endpoint: override.endpoint || '', model: override.model || '' })
+  if (warmSearchJobs.has(jobKey)) return false
+  const job = (async () => {
+    for (const category of categories) {
+      while (interactiveSearches > 0) await new Promise((resolve) => setTimeout(resolve, 250))
+      await searchRankedWindow(query, maxResults, configuredUrl, category, 1, provider, override, true, false)
+    }
+  })().catch(() => {}).finally(() => warmSearchJobs.delete(jobKey))
+  warmSearchJobs.set(jobKey, job)
+  return true
 }
 
 function decodeHtml(value) {
@@ -447,8 +472,18 @@ async function handle(req, res) {
     const body = await readBody(req)
     if (!body.query || typeof body.query !== 'string') return json(res, 400, { error: 'query is required' })
     const selectedProvider = modelRuntimes[body.provider] ? body.provider : 'lmstudio'
-    const search = await searchRankedWindow(body.query.trim().slice(0, 500), Math.min(Number(body.maxResults) || 10, 10), body.baseUrl || searxngUrl, body.category || 'general', body.page, selectedProvider, body.providerConfig || {}, body.curate !== false)
-    return json(res, 200, search)
+    interactiveSearches += 1
+    try {
+      const search = await searchRankedWindow(body.query.trim().slice(0, 500), Math.min(Number(body.maxResults) || 10, 10), body.baseUrl || searxngUrl, body.category || 'general', body.page, selectedProvider, body.providerConfig || {}, body.curate !== false, body.includeOverview !== false)
+      return json(res, 200, search)
+    } finally { interactiveSearches -= 1 }
+  }
+  if (req.method === 'POST' && url.pathname === '/api/search/warm') {
+    const body = await readBody(req)
+    if (!body.query || typeof body.query !== 'string') return json(res, 400, { error: 'query is required' })
+    const selectedProvider = modelRuntimes[body.provider] ? body.provider : 'lmstudio'
+    const started = warmSearchCategories(body.query.trim().slice(0, 500), Math.min(Number(body.maxResults) || 10, 10), body.baseUrl || searxngUrl, selectedProvider, body.providerConfig || {})
+    return json(res, 202, { started, categories: ['news', 'github', 'science', 'images', 'videos'] })
   }
   if (req.method === 'POST' && url.pathname === '/api/research') {
     const body = await readBody(req)
