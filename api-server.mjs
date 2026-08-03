@@ -137,7 +137,7 @@ async function searchSearxng(query, depth = 'quick', maxResults = 10, configured
     if (results.length >= maxResults) break
   }
   const value = { provider: 'searxng', query, depth, page: safePage, pageSize: maxResults, hasMore: results.length >= maxResults, results: results.slice(0, maxResults), errors, queries: queriesFor(query, depth), budget: { requested: depth === 'deep' ? 3 : 1, used: queriesFor(query, depth).length } }
-  cache.set(key, { createdAt: Date.now(), value })
+  if (value.results.length) cache.set(key, { createdAt: Date.now(), value })
   return value
 }
 
@@ -182,7 +182,7 @@ async function searchRankedWindow(query, maxResults = 10, configuredUrl = searxn
           answer,
           overviewError,
         }
-        rankedSearchCache.set(cacheKey, { createdAt: Date.now(), value })
+        if (value.results.length) rankedSearchCache.set(cacheKey, { createdAt: Date.now(), value })
         return value
       })().finally(() => rankedSearchInflight.delete(cacheKey))
       rankedSearchInflight.set(cacheKey, pending)
@@ -198,7 +198,10 @@ function warmSearchCategories(query, maxResults, configuredUrl, provider, overri
   const categories = ['news', 'github', 'science', 'images', 'videos']
   const jobKey = JSON.stringify({ query, maxResults, configuredUrl, provider, endpoint: override.endpoint || '', model: override.model || '' })
   if (warmSearchJobs.has(jobKey)) return false
-  const job = Promise.all(categories.map((category) => searchRankedWindow(query, maxResults, configuredUrl, category, 1, provider, override, true, false))).catch(() => {}).finally(() => warmSearchJobs.delete(jobKey))
+  const job = (async () => {
+    await new Promise((resolve) => setTimeout(resolve, 4_000))
+    for (const category of categories) await searchRankedWindow(query, maxResults, configuredUrl, category, 1, provider, override, true, false)
+  })().catch(() => {}).finally(() => warmSearchJobs.delete(jobKey))
   warmSearchJobs.set(jobKey, job)
   return true
 }

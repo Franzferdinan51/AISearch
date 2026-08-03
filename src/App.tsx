@@ -442,7 +442,7 @@ function SearchOverview({ answer, sources, expanded, onToggle }: { answer: strin
     const heading = lines[0].replace(/^##\s+/, '')
     return <section key={`${heading}-${index}`}><h3>{heading}</h3>{lines.slice(1).map((line, lineIndex) => <p className={line.startsWith('- ') ? 'overview-finding' : ''} key={lineIndex}><CitationText text={line.replace(/^-\s+/, '')} sources={sources} /></p>)}</section>
   }) : <p>{cleanMarkdown(answer)}</p>
-  return <div className="search-overview"><div><Sparkles size={15} /> AI overview</div><div className={`overview-content ${expanded ? 'expanded' : ''}`}>{content}</div><button className="overview-expand" onClick={onToggle}>{expanded ? 'Show less' : 'Show full overview'} <ChevronDown size={14} /></button></div>
+  return <div className="search-overview"><div><Sparkles size={15} /> AI overview</div><div className={`overview-content ${expanded ? 'expanded' : ''}`}>{content}</div><button className="overview-expand" onClick={onToggle}>{expanded ? 'Show less' : 'Show full overview'} <ChevronDown size={14} /></button>{sources.length > 0 && <div className="overview-sources" aria-label="Overview sources"><span>Sources</span>{sources.slice(0, 6).map((source) => <a href={source.url || '#'} target={source.url ? '_blank' : undefined} rel="noreferrer" key={source.n} title={source.title}><Favicon url={source.url} /><b>{source.domain}</b><small>{source.n}</small></a>)}</div>}</div>
 }
 
 function EvidenceRow({ source }: { source: SearchSource }) {
