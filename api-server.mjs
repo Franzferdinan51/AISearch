@@ -123,6 +123,11 @@ const modelRuntimes = {
   minimax: { endpoint: process.env.MINIMAX_BASE_URL || 'https://api.minimax.io/v1', model: process.env.MINIMAX_MODEL || 'MiniMax-M2.7', key: process.env.MINIMAX_API_KEY || '' },
   grok: { endpoint: process.env.XAI_BASE_URL || 'https://api.x.ai/v1', model: process.env.XAI_MODEL || 'grok-4.5', key: process.env.XAI_API_KEY || '' },
 }
+const providerFallbackModels = {
+  openai: ['gpt-5.6-sol', 'gpt-5.6-terra', 'gpt-5.6-luna', 'gpt-5.6', 'gpt-5'],
+  minimax: ['MiniMax-M3', 'MiniMax-M2.7', 'MiniMax-M2.7-highspeed', 'MiniMax-M2.5', 'MiniMax-M2.5-highspeed', 'MiniMax-M2.1', 'MiniMax-M2.1-highspeed', 'MiniMax-M2', 'M2-her'],
+  grok: ['grok-4.5', 'grok-4.5-latest', 'grok-build-0.1', 'grok-build-latest', 'grok-4.3', 'grok-4.20-0309-reasoning', 'grok-4.20-reasoning-latest', 'grok-4.20-0309-non-reasoning', 'grok-4.20-non-reasoning-latest', 'grok-4.20-multi-agent-0309', 'grok-4.20-multi-agent-latest'],
+}
 
 const json = (res, status, body) => {
   res.writeHead(status, { 'content-type': 'application/json; charset=utf-8', 'access-control-allow-origin': '*', 'access-control-allow-headers': 'content-type, authorization' })
@@ -169,6 +174,12 @@ async function discoverModels(provider, endpoint, key = '') {
   }
   const detail = errors.join(' · ')
   if (provider === 'lmstudio' && /401|403/.test(detail)) throw new Error('Could not load models: LM Studio requires a server token. Add it in Providers and refresh.')
+  if (providerFallbackModels[provider]) {
+    return {
+      models: providerFallbackModels[provider].map((id) => ({ id, label: id, architecture: null, quantization: null })),
+      endpoint: configured.toString(), source: 'built-in-fallback', warning: `Live model discovery was unavailable: ${detail}`,
+    }
+  }
   throw new Error(`Could not load models: ${detail}`)
 }
 
@@ -218,6 +229,13 @@ async function searchSearxng(query, depth = 'quick', maxResults = 10, configured
       const response = await fetch(url, { signal: AbortSignal.timeout(15_000), headers: { accept: 'application/json' } })
       if (!response.ok) throw new Error(`SearXNG returned ${response.status}`)
       const payload = await response.json()
+      const unavailableEngines = Array.isArray(payload.unresponsive_engines) ? payload.unresponsive_engines : []
+      if (!Array.isArray(payload.results) || payload.results.length === 0) {
+        for (const engine of unavailableEngines) {
+          const [name, reason] = Array.isArray(engine) ? engine : [String(engine), 'unavailable']
+          errors.push({ query: focusedQuery, message: `SearXNG engine ${name}: ${reason}` })
+        }
+      }
       for (const result of Array.isArray(payload.results) ? payload.results : []) {
         if (!result.url || results.some((item) => item.url === result.url)) continue
         results.push({
@@ -241,7 +259,7 @@ async function searchRankedWindow(query, maxResults = 10, configuredUrl = searxn
   const stageOutcomes = []
   const effectiveOverride = { ...override, stageOutcomes }
   const localProfile = provider === 'lmstudio' ? ensureLocalProfile(override.endpoint || modelRuntimes.lmstudio.endpoint, override.model || modelRuntimes.lmstudio.model, override.localRuntime || {}) : null
-  const cacheKey = JSON.stringify({ query, pageSize, configuredUrl, category, provider, endpoint: override.endpoint || '', model: override.model || '', profileVersion: localProfile?.version || 0, curate })
+  const cacheKey = JSON.stringify({ query, page, pageSize, configuredUrl, category, provider, endpoint: override.endpoint || '', model: override.model || '', profileVersion: localProfile?.version || 0, curate })
   const hit = rankedSearchCache.get(cacheKey)
   let ranked
 
@@ -251,7 +269,10 @@ async function searchRankedWindow(query, maxResults = 10, configuredUrl = searxn
     let pending = rankedSearchInflight.get(cacheKey)
     if (!pending) {
       pending = (async () => {
-        const pages = await Promise.all(Array.from({ length: rankedSearchWindowPages }, (_, index) => searchSearxng(query, 'quick', pageSize, configuredUrl, category, index + 1)))
+        // Query only the requested page. Pulling a four-page window for every
+        // first search exhausts public SearXNG engines and also reranks later,
+        // lower-ranked pages as though they were page one.
+        const pages = [await searchSearxng(query, 'quick', pageSize, configuredUrl, category, page)]
         const seenUrls = new Set()
         const candidates = pages.flatMap((result) => result.results).filter((item) => {
           if (seenUrls.has(item.url)) return false
@@ -270,10 +291,11 @@ async function searchRankedWindow(query, maxResults = 10, configuredUrl = searxn
         const plan = curation.plan || { mode: 'fallback', focus: 'Match the user intent with direct, trustworthy websites.', criteria: [], error: curation.error || null }
         const value = {
           provider: pages[0]?.provider || 'searxng', query, depth: 'quick', pageSize,
+          hasMore: pages.some((result) => result.hasMore),
           results: curation.results,
           errors: pages.flatMap((result) => result.errors),
           queries: [query],
-          budget: { requested: rankedSearchWindowPages, used: rankedSearchWindowPages },
+          budget: { requested: 1, used: 1 },
           curation: { mode: curation.mode, error: curation.error, warning: curation.warning || null },
           plan: { mode: plan.mode, focus: plan.focus, criteria: plan.criteria, error: plan.error },
           answer,
@@ -287,11 +309,10 @@ async function searchRankedWindow(query, maxResults = 10, configuredUrl = searxn
       })().finally(() => rankedSearchInflight.delete(cacheKey))
       rankedSearchInflight.set(cacheKey, pending)
     }
-    ranked = { ...(await pending), cached: true }
+    ranked = { ...(await pending), cached: false }
   }
 
-  const start = (page - 1) * pageSize
-  return { ...ranked, page, hasMore: ranked.results.length > start + pageSize, results: ranked.results.slice(start, start + pageSize) }
+  return { ...ranked, page, hasMore: Boolean(ranked.hasMore) }
 }
 
 function warmSearchCategories(query, maxResults, configuredUrl, provider, override) {
@@ -704,7 +725,10 @@ async function synthesizeViaCli(provider, query, results, override = {}) {
     args = ['text', 'chat', '--output', 'json', '--non-interactive', '--message', prompt]
   } else if (provider === 'grok') {
     command = providerCommands.grok
-    args = ['--model', override.model || modelRuntimes.grok.model, '--output-format', 'json', '--max-turns', '1', '--no-plan', '--disable-web-search', '--single', prompt]
+    // Search has already gathered the evidence. Keep Grok's OAuth CLI in a
+    // single, tool-free turn so it summarizes/ranks that evidence rather than
+    // attempting an unrelated MCP/browser action.
+    args = ['--model', override.model || modelRuntimes.grok.model, '--output-format', 'json', '--max-turns', '2', '--reasoning-effort', 'low', '--no-plan', '--no-subagents', '--disable-web-search', '--tools', '', '--verbatim', '--single', prompt]
   } else return ''
   const result = await runCommand(command, args)
   if (!result.ok) throw new Error(result.error || `${provider} CLI synthesis failed`)
@@ -723,7 +747,7 @@ async function curateViaCli(provider, prompt, override = {}) {
     args = ['text', 'chat', '--output', 'json', '--non-interactive', '--message', prompt]
   } else if (provider === 'grok') {
     command = providerCommands.grok
-    args = ['--model', override.model || modelRuntimes.grok.model, '--output-format', 'json', '--max-turns', '1', '--no-plan', '--disable-web-search', '--single', prompt]
+    args = ['--model', override.model || modelRuntimes.grok.model, '--output-format', 'json', '--max-turns', '2', '--reasoning-effort', 'low', '--no-plan', '--no-subagents', '--disable-web-search', '--tools', '', '--verbatim', '--single', prompt]
   } else return ''
   const result = await runCommand(command, args)
   if (!result.ok) throw new Error(result.error || `${provider} CLI ranking failed`)
