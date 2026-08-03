@@ -150,21 +150,17 @@ async function searchRankedWindow(query, maxResults = 10, configuredUrl = searxn
     let pending = rankedSearchInflight.get(cacheKey)
     if (!pending) {
       pending = (async () => {
-        const planPromise = planSearch(provider, query, category, 'quick', override)
-        const pagesPromise = Promise.all(Array.from({ length: rankedSearchWindowPages }, (_, index) => searchSearxng(query, 'quick', pageSize, configuredUrl, category, index + 1)))
-        const [plan, pages] = await Promise.all([planPromise, pagesPromise])
+        const pages = await Promise.all(Array.from({ length: rankedSearchWindowPages }, (_, index) => searchSearxng(query, 'quick', pageSize, configuredUrl, category, index + 1)))
         const seenUrls = new Set()
         const candidates = pages.flatMap((result) => result.results).filter((item) => {
           if (seenUrls.has(item.url)) return false
           seenUrls.add(item.url)
           return true
         })
-        const curation = curate ? await curateResults(provider, query, candidates, override, plan) : { results: candidates, mode: 'disabled', error: null }
-        let answer = ''
-        let overviewError = null
-        if (includeOverview && curation.mode === 'ai' && curation.results.length) {
-          try { answer = await generateSearchOverview(provider, query, curation.results, override) } catch (error) { overviewError = error.message }
-        }
+        const curation = curate ? await curateResults(provider, query, candidates, override, null, includeOverview) : { results: candidates, mode: 'disabled', error: null, overview: '', plan: null }
+        const answer = curation.overview || ''
+        const overviewError = includeOverview && !answer ? curation.error : null
+        const plan = curation.plan || { mode: 'fallback', focus: 'Match the user intent with direct, trustworthy websites.', criteria: [], error: curation.error || null }
         const value = {
           provider: pages[0]?.provider || 'searxng', query, depth: 'quick', pageSize,
           results: curation.results,
@@ -377,19 +373,42 @@ function parseCuratedRanking(output, query, results) {
   return [...curated, ...heuristicRank(query, results.filter((_, index) => !used.has(index + 1)))]
 }
 
-async function curateResults(provider, query, results, override = {}, plan = null) {
+function parseSearchIntelligence(output, query, results) {
+  const intelligence = parseJsonObject(output, 'search intelligence')
+  return {
+    results: parseCuratedRanking(JSON.stringify(intelligence.ranking || []), query, results),
+    overview: String(intelligence.overview || '').trim(),
+    plan: {
+      mode: 'ai',
+      focus: String(intelligence.plan?.focus || '').slice(0, 280),
+      criteria: Array.isArray(intelligence.plan?.criteria) ? intelligence.plan.criteria.slice(0, 5).map((item) => String(item).slice(0, 120)) : [],
+      error: null,
+    },
+  }
+}
+
+async function curateResults(provider, query, results, override = {}, plan = null, includeOverview = false) {
   if (!results.length) return { results, mode: 'none', error: null }
   const sourceList = results.map((item, index) => `${index + 1}. ${item.title.slice(0, 120)} | ${new URL(item.url).hostname} | ${item.content.replace(/\s+/g, ' ').slice(0, 100)}`).join('\n')
+  if (includeOverview && provider === 'lmstudio') {
+    const prompt = `Query: ${query}\n\nReturn ONLY JSON: {"plan":{"focus":"short","criteria":["short"]},"ranking":[{"id":number,"score":0-100,"reason":"max 8 words"}],"overview":"concise Markdown answer with [id] citations"}. Rank every candidate exactly once. The overview must directly answer the query from the candidates only.\n\nCandidates:\n${sourceList}`
+    try {
+      const output = await chatCompletion(provider, 'You are Lumen\'s compact search intelligence engine. Plan, rank, and write one evidence-grounded overview in a single response.', prompt, override, { timeoutMs: 55_000, maxTokens: Math.min(1_050, 300 + results.length * 18) })
+      return { ...parseSearchIntelligence(output, query, results), mode: 'ai', error: null }
+    } catch (error) {
+      return { results: heuristicRank(query, results), mode: 'heuristic', error: error.message, overview: '', plan: null }
+    }
+  }
   const prompt = `Query: ${query}\nSearch focus: ${plan?.focus || 'directly satisfy the user intent'}\n\nRank every candidate. Prefer direct, trustworthy, useful websites. Return ONLY JSON array: [{"id":number,"score":0-100,"reason":"max 8 words"}]. Every id exactly once.\n\nCandidates:\n${sourceList}`
   try {
     if (provider !== 'lmstudio' && (await commandStatus(provider)).authenticated) {
       const output = await curateViaCli(provider, prompt)
-      return { results: parseCuratedRanking(output, query, results), mode: 'ai', error: null }
+      return { results: parseCuratedRanking(output, query, results), mode: 'ai', error: null, overview: '', plan: null }
     }
     const output = await chatCompletion(provider, 'You are a fast, precise web search ranking model. Rank supplied candidates only.', prompt, override, { timeoutMs: 22_000, maxTokens: Math.min(700, 80 + results.length * 14) })
-    return { results: parseCuratedRanking(output, query, results), mode: 'ai', error: null }
+    return { results: parseCuratedRanking(output, query, results), mode: 'ai', error: null, overview: '', plan: null }
   } catch (error) {
-    return { results: heuristicRank(query, results), mode: 'heuristic', error: error.message }
+    return { results: heuristicRank(query, results), mode: 'heuristic', error: error.message, overview: '', plan: null }
   }
 }
 
