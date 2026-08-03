@@ -11,7 +11,6 @@ const cache = new Map()
 const rankedSearchCache = new Map()
 const rankedSearchInflight = new Map()
 const warmSearchJobs = new Map()
-let interactiveSearches = 0
 const rankedSearchWindowPages = 4
 const appRoot = path.dirname(fileURLToPath(import.meta.url))
 const distRoot = path.join(appRoot, 'dist')
@@ -181,12 +180,7 @@ function warmSearchCategories(query, maxResults, configuredUrl, provider, overri
   const categories = ['news', 'github', 'science', 'images', 'videos']
   const jobKey = JSON.stringify({ query, maxResults, configuredUrl, provider, endpoint: override.endpoint || '', model: override.model || '' })
   if (warmSearchJobs.has(jobKey)) return false
-  const job = (async () => {
-    for (const category of categories) {
-      while (interactiveSearches > 0) await new Promise((resolve) => setTimeout(resolve, 250))
-      await searchRankedWindow(query, maxResults, configuredUrl, category, 1, provider, override, true, false)
-    }
-  })().catch(() => {}).finally(() => warmSearchJobs.delete(jobKey))
+  const job = Promise.all(categories.map((category) => searchRankedWindow(query, maxResults, configuredUrl, category, 1, provider, override, true, false))).catch(() => {}).finally(() => warmSearchJobs.delete(jobKey))
   warmSearchJobs.set(jobKey, job)
   return true
 }
@@ -472,11 +466,8 @@ async function handle(req, res) {
     const body = await readBody(req)
     if (!body.query || typeof body.query !== 'string') return json(res, 400, { error: 'query is required' })
     const selectedProvider = modelRuntimes[body.provider] ? body.provider : 'lmstudio'
-    interactiveSearches += 1
-    try {
-      const search = await searchRankedWindow(body.query.trim().slice(0, 500), Math.min(Number(body.maxResults) || 10, 10), body.baseUrl || searxngUrl, body.category || 'general', body.page, selectedProvider, body.providerConfig || {}, body.curate !== false, body.includeOverview !== false)
-      return json(res, 200, search)
-    } finally { interactiveSearches -= 1 }
+    const search = await searchRankedWindow(body.query.trim().slice(0, 500), Math.min(Number(body.maxResults) || 10, 10), body.baseUrl || searxngUrl, body.category || 'general', body.page, selectedProvider, body.providerConfig || {}, body.curate !== false, body.includeOverview !== false)
+    return json(res, 200, search)
   }
   if (req.method === 'POST' && url.pathname === '/api/search/warm') {
     const body = await readBody(req)

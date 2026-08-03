@@ -151,6 +151,7 @@ function App() {
     setResultsPage(1)
     setApiError('')
     setOverviewExpanded(false)
+    if (activeView === 'search' && nextCategory === 'general') warmSearchTabs(nextQuery)
     let current = 0
     const timer = window.setInterval(() => { current += 1; setStep(Math.min(current, 5)); if (current >= 5) window.clearInterval(timer) }, 600)
     try {
@@ -166,7 +167,6 @@ function App() {
       setAnswer(payload.answer || (nextCategory === 'news' ? `Latest news results for “${nextQuery}”.` : nextCategory === 'images' ? `Image results for “${nextQuery}”.` : nextCategory === 'videos' ? `Video results for “${nextQuery}”.` : nextCategory === 'github' ? `GitHub repositories for “${nextQuery}”.` : nextCategory === 'science' ? `Academic and technical results for “${nextQuery}”.` : `Found ${normalized.length} ${payload.curation?.mode === 'ai' ? 'AI-curated' : 'relevance-ranked'} web results for “${nextQuery}”. Review the overview and sources below, or switch to Deep research for a cited synthesis.`))
       if (payload.trace) setTraceSteps(payload.trace); else setTraceSteps([])
       if (normalized.length) setHistory((current) => [{ id: crypto.randomUUID(), query: nextQuery, createdAt: new Date().toISOString(), sources: normalized, answer: payload.answer || '' }, ...current.filter((item) => item.query !== nextQuery)].slice(0, 20))
-      if (activeView === 'search' && nextCategory === 'general' && normalized.length) warmSearchTabs(nextQuery)
       setStep(5)
     } catch (error) {
       setApiError(error instanceof Error ? error.message : 'Research API unavailable. Start `npm run dev:api`.')
