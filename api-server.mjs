@@ -14,6 +14,9 @@ const warmSearchJobs = new Map()
 const rankedSearchWindowPages = 4
 const appRoot = path.dirname(fileURLToPath(import.meta.url))
 const distRoot = path.join(appRoot, 'dist')
+// Local inference varies dramatically with model size, quantization, and
+// hardware. Give it a generous default, while retaining a bounded override.
+const lmStudioTimeoutMs = Math.min(Math.max(Number(process.env.LM_STUDIO_TIMEOUT_MS || 180_000), 30_000), 600_000)
 
 const providerCommands = {
   openai: process.env.OPENAI_CODEX_COMMAND || 'codex',
@@ -319,8 +322,10 @@ async function chatCompletion(provider, system, prompt, override = {}, options =
   runtime.model ||= modelRuntimes[provider]?.model || modelRuntimes.lmstudio.model
   runtime.key ||= modelRuntimes[provider]?.key || modelRuntimes.lmstudio.key
   const endpoint = chatCompletionsUrl(runtime.endpoint)
+  const requestedTimeout = options.timeoutMs || 30_000
+  const timeoutMs = provider === 'lmstudio' ? Math.max(requestedTimeout, lmStudioTimeoutMs) : requestedTimeout
   const response = await fetch(endpoint, {
-    method: 'POST', signal: AbortSignal.timeout(options.timeoutMs || 30_000), headers: { 'content-type': 'application/json', ...(runtime.key ? { authorization: `Bearer ${runtime.key}` } : {}) },
+    method: 'POST', signal: AbortSignal.timeout(timeoutMs), headers: { 'content-type': 'application/json', ...(runtime.key ? { authorization: `Bearer ${runtime.key}` } : {}) },
     body: JSON.stringify({ model: runtime.model, temperature: 0.1, max_tokens: options.maxTokens || 700, messages: [{ role: 'system', content: system }, { role: 'user', content: prompt }] }),
   })
   if (!response.ok) {
