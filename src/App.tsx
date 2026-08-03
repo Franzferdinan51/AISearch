@@ -347,8 +347,13 @@ function ResearchAnswer({ answer }: { answer: string }) {
 }
 
 function SearchOverview({ answer, expanded, onToggle }: { answer: string; expanded: boolean; onToggle: () => void }) {
-  const summary = cleanMarkdown(answer)
-  return <div className="search-overview"><div><Sparkles size={15} /> AI overview</div><p className={expanded ? 'expanded' : ''}>{summary}</p>{summary.length > 260 && <button className="overview-expand" onClick={onToggle}>{expanded ? 'Show less' : 'Show full overview'} <ChevronDown size={14} /></button>}</div>
+  const sections = answer.trim().split(/(?=^##\s+)/m).filter(Boolean)
+  const content = sections.length ? sections.map((section, index) => {
+    const lines = section.trim().split('\n').filter(Boolean)
+    const heading = lines[0].replace(/^##\s+/, '')
+    return <section key={`${heading}-${index}`}><h3>{heading}</h3>{lines.slice(1).map((line, lineIndex) => <p className={line.startsWith('- ') ? 'overview-finding' : ''} key={lineIndex}><InlineMarkdown text={line.replace(/^-\s+/, '')} /></p>)}</section>
+  }) : <p>{cleanMarkdown(answer)}</p>
+  return <div className="search-overview"><div><Sparkles size={15} /> AI overview</div><div className={`overview-content ${expanded ? 'expanded' : ''}`}>{content}</div>{answer.length > 260 && <button className="overview-expand" onClick={onToggle}>{expanded ? 'Show less' : 'Show full overview'} <ChevronDown size={14} /></button>}</div>
 }
 
 function EvidenceRow({ source }: { source: SearchSource }) {

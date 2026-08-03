@@ -144,6 +144,11 @@ async function searchRankedWindow(query, maxResults = 10, configuredUrl = searxn
       return true
     })
     const curation = curate ? await curateResults(provider, query, candidates, override) : { results: candidates, mode: 'disabled', error: null }
+    let answer = ''
+    let overviewError = null
+    if (curation.mode === 'ai' && curation.results.length) {
+      try { answer = await generateSearchOverview(provider, query, curation.results, override) } catch (error) { overviewError = error.message }
+    }
     ranked = {
       provider: pages[0]?.provider || 'searxng', query, depth: 'quick', pageSize,
       results: curation.results,
@@ -151,6 +156,8 @@ async function searchRankedWindow(query, maxResults = 10, configuredUrl = searxn
       queries: [query],
       budget: { requested: rankedSearchWindowPages, used: rankedSearchWindowPages },
       curation: { mode: curation.mode, error: curation.error },
+      answer,
+      overviewError,
     }
     rankedSearchCache.set(cacheKey, { createdAt: Date.now(), value: ranked })
   }
@@ -326,6 +333,12 @@ async function curateResults(provider, query, results, override = {}) {
   } catch (error) {
     return { results: heuristicRank(query, results), mode: 'heuristic', error: error.message }
   }
+}
+
+async function generateSearchOverview(provider, query, results, override = {}) {
+  const strongestSources = results.slice(0, 8)
+  if (provider !== 'lmstudio' && (await commandStatus(provider)).authenticated) return synthesizeViaCli(provider, query, strongestSources)
+  return synthesize(provider, query, strongestSources, override)
 }
 
 async function synthesizeViaCli(provider, query, results) {
