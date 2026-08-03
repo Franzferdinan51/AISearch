@@ -145,7 +145,7 @@ function App() {
     const timer = window.setInterval(() => { current += 1; setStep(Math.min(current, 5)); if (current >= 5) window.clearInterval(timer) }, 600)
     try {
       const isDeep = mode === 'Deep research' || mode === 'Explore' || view === 'research'
-      const endpoint = view === 'search' && (nextCategory === 'images' || nextCategory === 'videos') ? '/api/search' : '/api/research'
+      const endpoint = view === 'search' && nextCategory !== 'general' ? '/api/search' : '/api/research'
       const response = await fetch(endpoint, { method: 'POST', headers: { 'content-type': 'application/json' }, body: JSON.stringify({ query: nextQuery, provider: selectedProvider, providerConfig: { endpoint: provider.endpoint, model: provider.model }, baseUrl: searchEndpoint, category: nextCategory, depth: isDeep ? 'deep' : 'quick', maxResults: 10, page: 1 }) })
       const payload = await response.json()
       if (!response.ok) throw new Error(payload.error || 'Research request failed')
@@ -153,8 +153,8 @@ function App() {
       setSourceList(normalized)
       setHasMoreResults(Boolean(payload.search?.hasMore ?? payload.hasMore))
       setCurationMode(payload.search?.curation?.mode || payload.curation?.mode || 'none')
-      setAnswer(payload.answer || (nextCategory === 'images' ? `Image results for “${nextQuery}”.` : nextCategory === 'videos' ? `Video results for “${nextQuery}”.` : 'Research completed.'))
-      if (payload.trace) setTraceSteps(payload.trace)
+      setAnswer(payload.answer || (nextCategory === 'news' ? `Latest news results for “${nextQuery}”.` : nextCategory === 'images' ? `Image results for “${nextQuery}”.` : nextCategory === 'videos' ? `Video results for “${nextQuery}”.` : nextCategory === 'github' ? `GitHub repositories for “${nextQuery}”.` : nextCategory === 'science' ? `Academic and technical results for “${nextQuery}”.` : 'Research completed.'))
+      if (payload.trace) setTraceSteps(payload.trace); else setTraceSteps([])
       if (normalized.length) setHistory((current) => [{ id: crypto.randomUUID(), query: nextQuery, createdAt: new Date().toISOString(), sources: normalized, answer: payload.answer || '' }, ...current.filter((item) => item.query !== nextQuery)].slice(0, 20))
       setStep(5)
     } catch (error) {
