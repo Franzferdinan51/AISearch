@@ -260,9 +260,9 @@ async function searchRankedWindow(query, maxResults = 10, configuredUrl = searxn
         })
         let curation
         try {
-          curation = curate ? await curateResults(provider, query, candidates, effectiveOverride, null, includeOverview) : { results: candidates, mode: 'disabled', error: null, overview: '', plan: null }
+          curation = curate ? await curateResults(provider, query, candidates, effectiveOverride, null, includeOverview) : { results: candidates, mode: 'disabled', error: null, overview: '', plan: null, diagnostics: [] }
         } catch (error) {
-          curation = { results: heuristicRank(query, candidates), mode: 'heuristic', error: error.message, overview: '', plan: null }
+          curation = { results: heuristicRank(query, candidates), mode: 'heuristic', error: error.message, overview: '', plan: null, diagnostics: [{ provider, stage: 'curation', message: error.message, severity: 'error' }] }
         }
         if (!Array.isArray(curation.results) || !curation.results.length) curation = { ...curation, results: heuristicRank(query, candidates), mode: 'heuristic', error: curation.error || 'AI response did not include usable rankings.' }
         const answer = curation.overview || ''
@@ -280,6 +280,7 @@ async function searchRankedWindow(query, maxResults = 10, configuredUrl = searxn
           overviewError,
           runtime: localProfile ? publicLocalProfile(localProfile) : null,
           stages: stageOutcomes,
+          diagnostics: curation.diagnostics || [],
         }
         if (value.results.length) rankedSearchCache.set(cacheKey, { createdAt: Date.now(), value })
         return value
@@ -661,23 +662,25 @@ async function curateResults(provider, query, results, override = {}, plan = nul
       overviewError = error.message
     }
     const ranked = await rankEveryResultWithAI(provider, query, results, override)
-    if (ranked.complete) return { results: ranked.results, mode: 'ai', error: null, overview, plan: planResult }
+    if (ranked.complete) return { results: ranked.results, mode: 'ai', error: null, overview, plan: planResult, diagnostics: [] }
     const modelReturnedOverview = overview !== sourceOverview(query, results)
     if (ranked.rankedCount || modelReturnedOverview || modelResponded) {
-      return { results: ranked.results, mode: 'partial', error: null, warning: ranked.error || overviewError || `AI ranked ${ranked.rankedCount} of ${results.length} results; remaining results use relevance fallback.`, overview, plan: planResult }
+      const warning = ranked.error || overviewError || `AI ranked ${ranked.rankedCount} of ${results.length} results; remaining results use relevance fallback.`
+      return { results: ranked.results, mode: 'partial', error: null, warning, overview, plan: planResult, diagnostics: [{ provider, stage: 'overview/ranking', message: warning, severity: 'warning' }] }
     }
-    return { results: ranked.results, mode: 'heuristic', error: overviewError || ranked.error || 'The model did not return usable search intelligence.', overview, plan: planResult }
+    const error = overviewError || ranked.error || 'The model did not return usable search intelligence.'
+    return { results: ranked.results, mode: 'heuristic', error, overview, plan: planResult, diagnostics: [{ provider, stage: 'overview/ranking', message: error, severity: 'error' }] }
   }
   const prompt = `Query: ${query}\nSearch focus: ${plan?.focus || 'directly satisfy the user intent'}\n\nRank every candidate. Prefer direct, trustworthy, useful websites. Return ONLY JSON array: [{"id":number,"score":0-100,"reason":"max 8 words"}]. Every id exactly once.\n\nCandidates:\n${sourceList}`
   try {
     if (provider !== 'lmstudio' && (await commandStatus(provider)).authenticated) {
-      const output = await curateViaCli(provider, prompt)
-      return { results: parseCuratedRanking(output, query, results), mode: 'ai', error: null, overview: '', plan: null }
+      const output = await curateViaCli(provider, prompt, override)
+      return { results: parseCuratedRanking(output, query, results), mode: 'ai', error: null, overview: '', plan: null, diagnostics: [] }
     }
     const output = await chatCompletion(provider, 'You are a fast, precise web search ranking model. Rank supplied candidates only.', prompt, override, { timeoutMs: 22_000, maxTokens: Math.min(700, 80 + results.length * 14), stage: 'rank', cacheable: true, stageOutcomes: override.stageOutcomes })
-    return { results: parseCuratedRanking(output, query, results), mode: 'ai', error: null, overview: '', plan: null }
+    return { results: parseCuratedRanking(output, query, results), mode: 'ai', error: null, overview: '', plan: null, diagnostics: [] }
   } catch (error) {
-    return { results: heuristicRank(query, results), mode: 'heuristic', error: error.message, overview: '', plan: null }
+    return { results: heuristicRank(query, results), mode: 'heuristic', error: error.message, overview: '', plan: null, diagnostics: [{ provider, stage: 'ranking', message: error.message, severity: 'error' }] }
   }
 }
 
@@ -687,7 +690,7 @@ async function generateSearchOverview(provider, query, results, override = {}) {
   return synthesize(provider, query, strongestSources, override, '', { timeoutMs: 28_000, maxTokens: 650, stage: 'overview', cacheable: true, stageOutcomes: override.stageOutcomes })
 }
 
-async function synthesizeViaCli(provider, query, results) {
+async function synthesizeViaCli(provider, query, results, override = {}) {
   const context = results.map((item, index) => `[${index + 1}] ${item.pageTitle || item.title}\n${item.url}\n${(item.pageText || item.content).slice(0, 2_500)}`).join('\n\n')
   const prompt = `You are Lumen, a rigorous web research agent. Use only the supplied website evidence. Cite every substantive claim inline as [1], [2], do not invent sources, and state uncertainty. Return concise Markdown with exactly these headings: ## Executive synthesis, ## Key findings (three evidence-backed bullets), ## Detailed analysis, ## Limits.\n\nQuestion: ${query}\n\nWebsite sources:\n${context}`
   let command
@@ -701,14 +704,14 @@ async function synthesizeViaCli(provider, query, results) {
     args = ['text', 'chat', '--output', 'json', '--non-interactive', '--message', prompt]
   } else if (provider === 'grok') {
     command = providerCommands.grok
-    args = ['--output-format', 'json', '--max-turns', '1', '--no-plan', '--disable-web-search', '--single', prompt]
+    args = ['--model', override.model || modelRuntimes.grok.model, '--output-format', 'json', '--max-turns', '1', '--no-plan', '--disable-web-search', '--single', prompt]
   } else return ''
   const result = await runCommand(command, args)
   if (!result.ok) throw new Error(result.error || `${provider} CLI synthesis failed`)
   return extractCliText(provider, result.output).replace(/<think>[\s\S]*?<\/think>/gi, '').trim()
 }
 
-async function curateViaCli(provider, prompt) {
+async function curateViaCli(provider, prompt, override = {}) {
   let command
   let args
   if (provider === 'openai') {
@@ -720,7 +723,7 @@ async function curateViaCli(provider, prompt) {
     args = ['text', 'chat', '--output', 'json', '--non-interactive', '--message', prompt]
   } else if (provider === 'grok') {
     command = providerCommands.grok
-    args = ['--output-format', 'json', '--max-turns', '1', '--no-plan', '--disable-web-search', '--single', prompt]
+    args = ['--model', override.model || modelRuntimes.grok.model, '--output-format', 'json', '--max-turns', '1', '--no-plan', '--disable-web-search', '--single', prompt]
   } else return ''
   const result = await runCommand(command, args)
   if (!result.ok) throw new Error(result.error || `${provider} CLI ranking failed`)
@@ -860,7 +863,7 @@ async function handle(req, res) {
       catch (error) { synthesisErrors.push({ provider: `${selectedProvider}:evidence-check`, message: error.message }) }
       if (selectedProvider !== 'lmstudio' && (await commandStatus(selectedProvider)).authenticated) {
         try {
-          answer = await synthesizeViaCli(selectedProvider, body.query, researchSearch.results)
+          answer = await synthesizeViaCli(selectedProvider, body.query, researchSearch.results, providerConfig)
           if (answer) synthesisMode = 'oauth-cli'
         } catch (error) { synthesisErrors.push({ provider: `${selectedProvider}:oauth-cli`, message: error.message }) }
       }
@@ -878,7 +881,8 @@ async function handle(req, res) {
       { step: 'Synthesize', status: answer ? 'complete' : 'error', detail: answer ? `Synthesized with ${selectedProvider}${synthesisMode === 'oauth-cli' ? ' OAuth session' : ''}.` : 'No model synthesis was produced.' },
     ]
     const runtime = selectedProvider === 'lmstudio' ? publicLocalProfile(ensureLocalProfile(providerConfig.endpoint || modelRuntimes.lmstudio.endpoint, providerConfig.model || modelRuntimes.lmstudio.model, providerConfig.localRuntime || {})) : null
-    return json(res, 200, { query: body.query, provider: selectedProvider, synthesisMode, plan, evidenceReview, search: { ...researchSearch, errors: [...researchSearch.errors, ...synthesisErrors], curation: { mode: curation.mode, error: curation.error, warning: curation.warning || null } }, trace, stages: stageOutcomes, runtime, answer: answer || (researchSearch.results.length ? `Research retrieved ${researchSearch.results.length} sources, but ${selectedProvider} could not synthesize them. Check the provider endpoint, model, or server-side credentials.` : 'SearXNG did not return sources. Check the SearXNG URL and JSON format configuration, then try again.') })
+    const diagnostics = [...(curation.diagnostics || []), ...synthesisErrors.map((item) => ({ provider: item.provider, stage: 'research', message: item.message, severity: 'error' }))]
+    return json(res, 200, { query: body.query, provider: selectedProvider, synthesisMode, plan, evidenceReview, search: { ...researchSearch, errors: [...researchSearch.errors, ...synthesisErrors], curation: { mode: curation.mode, error: curation.error, warning: curation.warning || null } }, trace, stages: stageOutcomes, runtime, diagnostics, answer: answer || (researchSearch.results.length ? `Research retrieved ${researchSearch.results.length} sources, but ${selectedProvider} could not synthesize them. Check the provider endpoint, model, or server-side credentials.` : 'SearXNG did not return sources. Check the SearXNG URL and JSON format configuration, then try again.') })
   }
   return json(res, 404, { error: 'Not found' })
 }

@@ -266,8 +266,10 @@ function App() {
       setCurationMode(payload.search?.curation?.mode || payload.curation?.mode || 'none')
       setLocalRuntime(payload.runtime || payload.search?.runtime || null)
       setRuntimeStages(payload.stages || payload.search?.stages || [])
+      const diagnostics = payload.diagnostics || payload.search?.diagnostics || []
       const curationError = payload.search?.curation?.error || payload.curation?.error
-      if (curationError && selectedProvider === 'lmstudio') setApiError(`LM Studio was not used for this search: ${curationError}`)
+      if (diagnostics.length) setApiError(`AI diagnostics · ${diagnostics[0].provider || provider.name} ${diagnostics[0].stage || 'request'}: ${diagnostics[0].message}`)
+      else if (curationError && !normalized.length) setApiError(`${selectedProvider === 'lmstudio' ? 'Local model' : provider.name} could not curate this empty result set: ${curationError}`)
       setAnswer(payload.answer || (nextCategory === 'news' ? `Latest news results for “${nextQuery}”.` : nextCategory === 'images' ? `Image results for “${nextQuery}”.` : nextCategory === 'videos' ? `Video results for “${nextQuery}”.` : nextCategory === 'github' ? `GitHub repositories for “${nextQuery}”.` : nextCategory === 'science' ? `Academic and technical results for “${nextQuery}”.` : `Found ${normalized.length} ${payload.curation?.mode === 'ai' ? 'AI-curated' : 'relevance-ranked'} web results for “${nextQuery}”. Review the overview and sources below, or switch to Deep research for a cited synthesis.`))
       if (payload.trace) setTraceSteps(payload.trace); else setTraceSteps([])
       if (normalized.length) setHistory((current) => [{ id: crypto.randomUUID(), query: nextQuery, createdAt: new Date().toISOString(), sources: normalized, answer: payload.answer || '' }, ...current.filter((item) => item.query !== nextQuery)].slice(0, 20))
@@ -297,6 +299,8 @@ function App() {
       setCurationMode(payload.curation?.mode || 'none')
       setLocalRuntime(payload.runtime || null)
       setRuntimeStages(payload.stages || [])
+      const diagnostics = payload.diagnostics || []
+      if (diagnostics.length) setApiError(`AI diagnostics · ${diagnostics[0].provider || provider.name} ${diagnostics[0].stage || 'request'}: ${diagnostics[0].message}`)
       document.querySelector('.results-scroller')?.scrollTo({ top: 0, behavior: 'smooth' })
     } catch (error) {
       if (!(error instanceof DOMException && error.name === 'AbortError')) setApiError(error instanceof Error ? error.message : 'Could not load this page of results')
@@ -353,7 +357,7 @@ function App() {
 
   const answerTitle = useMemo(() => query || 'Start a new research thread', [query])
   const openHistory = (session: SearchSession) => { setQuery(session.query); setSourceList(session.sources); setAnswer(session.answer); setResultsPage(1); setHasMoreResults(true); setView('search') }
-  const newSearch = () => { const nextMode = preferences.defaultMode; setView(nextMode === 'Deep research' || nextMode === 'Explore' ? 'research' : 'search'); setMode(nextMode); setQuery(''); setInput(''); setSourceList([]); setAnswer(''); setTraceSteps([]); setApiError(''); setResultsPage(1); setHasMoreResults(true); setCurationMode('none'); setRunning(false) }
+  const newSearch = () => { const nextMode = preferences.defaultMode; setView(nextMode === 'Deep research' || nextMode === 'Explore' ? 'research' : 'search'); setMode(nextMode); setQuery(''); setInput(''); setSourceList([]); setAnswer(''); setTraceSteps([]); setApiError(''); setRuntimeStages([]); setResultsPage(1); setHasMoreResults(true); setCurationMode('none'); setRunning(false) }
   const selectMode = (nextMode: Mode) => {
     const nextView = nextMode === 'Deep research' || nextMode === 'Explore' ? 'research' : 'search'
     setMode(nextMode)
