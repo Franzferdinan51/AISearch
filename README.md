@@ -2,6 +2,10 @@
 
 Lumen is a local-first AI web search and deep-research workspace. It uses SearXNG for website retrieval and scoped search, AI ranking for tailored results, LM Studio as a first-class local runtime, and local CLI OAuth sessions for OpenAI, MiniMax, and Grok.
 
+## App preview
+
+![Lumen deep-research workspace showing cited synthesis and the live agent trace](public/lumen-concept.png)
+
 ## What it does
 
 - Searches websites rather than only research papers, with Web, News, Images, Videos, GitHub, and Academic scopes.
