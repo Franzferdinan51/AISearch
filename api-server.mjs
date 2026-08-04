@@ -259,7 +259,7 @@ async function searchRankedWindow(query, maxResults = 10, configuredUrl = searxn
   const stageOutcomes = []
   const effectiveOverride = { ...override, stageOutcomes }
   const localProfile = provider === 'lmstudio' ? ensureLocalProfile(override.endpoint || modelRuntimes.lmstudio.endpoint, override.model || modelRuntimes.lmstudio.model, override.localRuntime || {}) : null
-  const cacheKey = JSON.stringify({ query, page, pageSize, configuredUrl, category, provider, endpoint: override.endpoint || '', model: override.model || '', profileVersion: localProfile?.version || 0, curate })
+  const cacheKey = JSON.stringify({ query, page, pageSize, configuredUrl, category, provider, endpoint: override.endpoint || '', model: override.model || '', profileVersion: localProfile?.version || 0, curate, includeOverview })
   const hit = rankedSearchCache.get(cacheKey)
   let ranked
 
@@ -724,7 +724,8 @@ async function synthesizeViaCli(provider, query, results, override = {}) {
   if (provider === 'openai') {
     command = providerCommands.openai
     args = ['exec', '--ephemeral', '--skip-git-repo-check', '--sandbox', 'read-only', '--json', prompt]
-    if (providerCliModels.openai) args.splice(1, 0, '--model', providerCliModels.openai)
+    const selectedModel = override.model || providerCliModels.openai
+    if (selectedModel) args.splice(1, 0, '--model', selectedModel)
   } else if (provider === 'minimax') {
     command = providerCommands.minimax
     args = ['text', 'chat', '--output', 'json', '--non-interactive', '--message', prompt]
@@ -746,7 +747,8 @@ async function curateViaCli(provider, prompt, override = {}) {
   if (provider === 'openai') {
     command = providerCommands.openai
     args = ['exec', '--ephemeral', '--skip-git-repo-check', '--sandbox', 'read-only', '--json', prompt]
-    if (providerCliModels.openai) args.splice(1, 0, '--model', providerCliModels.openai)
+    const selectedModel = override.model || providerCliModels.openai
+    if (selectedModel) args.splice(1, 0, '--model', selectedModel)
   } else if (provider === 'minimax') {
     command = providerCommands.minimax
     args = ['text', 'chat', '--output', 'json', '--non-interactive', '--message', prompt]
@@ -930,5 +932,8 @@ async function serveStatic(requestPath, res) {
   }
 }
 
-const server = http.createServer((req, res) => handle(req, res).catch((error) => json(res, 500, { error: error.message })))
+const server = http.createServer((req, res) => handle(req, res).catch((error) => {
+  const status = error.message === 'Invalid JSON' ? 400 : error.message === 'Request too large' ? 413 : 500
+  json(res, status, { error: error.message || 'Internal server error' })
+}))
 server.listen(port, host, () => console.log(`Lumen API listening on http://${host}:${port}`))
