@@ -26,13 +26,13 @@ npm run dev:api
 npm run dev
 ```
 
-The browser runs on Vite and proxies `/api` to the local orchestration API. The API defaults to `127.0.0.1:3001`; set `LUMEN_API_PORT` if another local service already owns that port, and start Vite with the same variable.
+The browser runs on Vite and proxies `/api` to the local orchestration API. The supplied npm scripts load `.env` automatically; the API defaults to `127.0.0.1:3001`. If you change `LUMEN_API_PORT`, Vite reads the same `.env` value and follows it automatically.
 
 SearXNG must allow JSON output and respond at `/search?format=json`. The deep-research route is bounded to three focused queries, deduplicates URLs, caches results for five minutes, AI-ranks the retrieved set, and reads every reachable source page with timeouts before synthesis. Quick scoped search stays snippet-first and does not crawl pages.
 
 For local models, Lumen uses a compact search-intelligence request plus bounded ranking batches for the quick-search plan, full-result ranking, match scores, tailored reasons, and AI overview. It accepts strict JSON, fenced JSON, recoverable overview fields from truncated JSON, and conservative numbered-score output from local chat templates. If a model returns useful but partial search intelligence, the UI reports **AI-assisted** rather than incorrectly saying LM Studio was unused; only the unranked remainder falls back to deterministic relevance scoring. Deep research retains its separate read, evidence-check, and synthesis stages.
 
-`npm run searxng` starts the bundled SearXNG container on `http://127.0.0.1:8080`. Lumen returns normal web pages, documentation, GitHub repositories, news, and other engine results from SearXNG; it does not restrict retrieval to academic sources.
+`npm run searxng` starts the bundled SearXNG container on `http://127.0.0.1:8080` and falls back to legacy `docker-compose` when the newer Docker Compose plugin is unavailable. Lumen returns normal web pages, documentation, GitHub repositories, news, and other engine results from SearXNG; it does not restrict retrieval to academic sources.
 
 For a production-like local stack, run `docker compose up --build`. Lumen is served at `http://127.0.0.1:3000` and reaches the bundled SearXNG service over the private Compose network.
 

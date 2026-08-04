@@ -5,10 +5,10 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "dev:api": "node api-server.mjs",
-    "searxng": "docker compose up searxng",
-    "start": "node api-server.mjs",
-    "mcp": "node mcp-server.mjs",
+    "dev:api": "node --env-file-if-exists=.env api-server.mjs",
+    "searxng": "docker compose up searxng || docker-compose up searxng",
+    "start": "node --env-file-if-exists=.env api-server.mjs",
+    "mcp": "node --env-file-if-exists=.env mcp-server.mjs",
     "build": "tsc -p tsconfig.app.json --noEmit && vite build",
     "preview": "vite preview"
   },
